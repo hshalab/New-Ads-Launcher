@@ -3,13 +3,13 @@
 import { useCallback, useEffect, useState } from "react"
 import { AdAccountPill } from "@/components/shared/ad-account-pill"
 import { AccountOverviewCards } from "@/components/ad-accounts/AccountOverviewCards"
+import { AdsDateRangePicker, getPresetRange } from "@/components/ads-manager/AdsDateRangePicker"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import {
   IconAlertCircle,
   IconArrowsSort,
-  IconCalendar,
   IconLoader2,
   IconRefresh,
   IconSearch,
@@ -105,9 +105,13 @@ function formatMinorMoney(value?: string | number | null, currency = "USD") {
   return formatAccountMoney(amount, currency)
 }
 
-function toDateInputValue(iso?: string | null) {
-  if (!iso) return ""
-  return iso.slice(0, 10)
+function toDateInputValue(value?: string | Date | null) {
+  if (!value) return ""
+  const date = typeof value === "string" ? new Date(value) : value
+  if (!Number.isFinite(date.getTime())) return ""
+  const month = String(date.getMonth() + 1).padStart(2, "0")
+  const day = String(date.getDate()).padStart(2, "0")
+  return `${date.getFullYear()}-${month}-${day}`
 }
 
 export function AdAccountsManager() {
@@ -123,9 +127,10 @@ export function AdAccountsManager() {
   const [selectedAccountId, setSelectedAccountId] = useState("")
   const [limitSnapshots, setLimitSnapshots] = useState<AccountMetricSnapshot[]>([])
   const [limitLoading, setLimitLoading] = useState(false)
+  const [datePreset, setDatePreset] = useState("")
   const [dateFrom, setDateFrom] = useState("")
   const [dateTo, setDateTo] = useState("")
-  // Historical data for Ad Accounts tab
+  const [acctDatePreset, setAcctDatePreset] = useState("")
   const [acctDateFrom, setAcctDateFrom] = useState("")
   const [acctDateTo, setAcctDateTo] = useState("")
   const [historicalAccounts, setHistoricalAccounts] = useState<AccountMetricSnapshot[]>([])
@@ -373,43 +378,34 @@ export function AdAccountsManager() {
 
               <div className="mx-1 h-4 w-px bg-border" />
 
-              {/* DATE filter â€” keep FROM/TO/Clear together so they never wrap apart */}
+              {/* DATE filter — keep FROM/TO/Clear together so they never wrap apart */}
               <div className="flex shrink-0 items-center gap-2">
-                <div className={cn(
-                  "flex items-center gap-2 rounded-full border px-3 py-1.5 transition-colors",
-                  hasAcctDateFilter ? "border-primary bg-primary/10" : "border-border bg-muted/50"
-                )}>
-                  <IconCalendar className={cn("size-3.5 shrink-0", hasAcctDateFilter ? "text-primary" : "text-muted-foreground")} />
-                  <span className={cn("text-xs font-medium", hasAcctDateFilter ? "text-primary" : "text-muted-foreground")}>From</span>
-                  <input
-                    type="date"
-                    value={acctDateFrom}
-                    onChange={e => setAcctDateFrom(e.target.value)}
-                    max={acctDateTo || toDateInputValue(new Date().toISOString())}
-                    className="h-6 border-0 bg-transparent text-sm font-medium text-foreground outline-none [color-scheme:light]"
-                  />
-                </div>
-
-                <div className={cn(
-                  "flex items-center gap-2 rounded-full border px-3 py-1.5 transition-colors",
-                  hasAcctDateFilter ? "border-primary bg-primary/10" : "border-border bg-muted/50"
-                )}>
-                  <IconCalendar className={cn("size-3.5 shrink-0", hasAcctDateFilter ? "text-primary" : "text-muted-foreground")} />
-                  <span className={cn("text-xs font-medium", hasAcctDateFilter ? "text-primary" : "text-muted-foreground")}>To</span>
-                  <input
-                    type="date"
-                    value={acctDateTo}
-                    onChange={e => setAcctDateTo(e.target.value)}
-                    min={acctDateFrom || undefined}
-                    max={toDateInputValue(new Date().toISOString())}
-                    className="h-6 border-0 bg-transparent text-sm font-medium text-foreground outline-none [color-scheme:light]"
-                  />
-                </div>
+                <AdsDateRangePicker
+                  preset={acctDatePreset}
+                  customStart={acctDateFrom ? new Date(acctDateFrom + "T00:00:00") : undefined}
+                  customEnd={acctDateTo ? new Date(acctDateTo + "T00:00:00") : undefined}
+                  onChange={(preset, start, end) => {
+                    setAcctDatePreset(preset)
+                    if (preset === "custom" || preset === "maximum") {
+                      setAcctDateFrom(start ? toDateInputValue(start) : "")
+                      setAcctDateTo(end ? toDateInputValue(end) : "")
+                    } else {
+                      const range = getPresetRange(preset)
+                      setAcctDateFrom(toDateInputValue(range.start))
+                      setAcctDateTo(toDateInputValue(range.end))
+                    }
+                  }}
+                  onClose={() => {}}
+                />
 
                 {hasAcctDateFilter && (
                   <button
-                    onClick={() => { setAcctDateFrom(""); setAcctDateTo("") }}
-                    className="flex items-center gap-1 rounded-full bg-primary/10 px-3 py-1.5 text-xs font-semibold text-primary transition-colors hover:bg-primary/15"
+                    onClick={() => {
+                      setAcctDatePreset("")
+                      setAcctDateFrom("")
+                      setAcctDateTo("")
+                    }}
+                    className="flex h-8 items-center gap-1 rounded-full bg-primary/10 px-3 py-1.5 text-xs font-semibold text-primary transition-colors hover:bg-primary/15"
                   >
                     <IconX className="size-3" />
                     Clear
@@ -459,35 +455,33 @@ export function AdAccountsManager() {
 
             {/* Row 2: date range filter */}
             <div className="flex flex-wrap items-center gap-2">
-              <div className="flex items-center gap-2 rounded-full border border-border bg-muted/50 px-3 py-1.5">
-                <IconCalendar className="size-3.5 shrink-0 text-muted-foreground" />
-                <span className="text-xs font-medium text-muted-foreground">From</span>
-                <input
-                  type="date"
-                  value={dateFrom}
-                  onChange={e => setDateFrom(e.target.value)}
-                  max={dateTo || toDateInputValue(new Date().toISOString())}
-                  className="h-6 border-0 bg-transparent text-sm font-medium text-foreground outline-none [color-scheme:light]"
-                />
-              </div>
-
-              <div className="flex items-center gap-2 rounded-full border border-border bg-muted/50 px-3 py-1.5">
-                <IconCalendar className="size-3.5 shrink-0 text-muted-foreground" />
-                <span className="text-xs font-medium text-muted-foreground">To</span>
-                <input
-                  type="date"
-                  value={dateTo}
-                  onChange={e => setDateTo(e.target.value)}
-                  min={dateFrom || undefined}
-                  max={toDateInputValue(new Date().toISOString())}
-                  className="h-6 border-0 bg-transparent text-sm font-medium text-foreground outline-none [color-scheme:light]"
-                />
-              </div>
+              <AdsDateRangePicker
+                preset={datePreset}
+                customStart={dateFrom ? new Date(dateFrom + "T00:00:00") : undefined}
+                customEnd={dateTo ? new Date(dateTo + "T00:00:00") : undefined}
+                accountId={selectedAccount?.account_id}
+                onChange={(preset, start, end) => {
+                  setDatePreset(preset)
+                  if (preset === "custom" || preset === "maximum") {
+                    setDateFrom(start ? toDateInputValue(start) : "")
+                    setDateTo(end ? toDateInputValue(end) : "")
+                  } else {
+                    const range = getPresetRange(preset)
+                    setDateFrom(toDateInputValue(range.start))
+                    setDateTo(toDateInputValue(range.end))
+                  }
+                }}
+                onClose={() => {}}
+              />
 
               {hasDateFilter && (
                 <button
-                  onClick={() => { setDateFrom(""); setDateTo("") }}
-                  className="flex items-center gap-1 rounded-full bg-muted px-3 py-1.5 text-xs font-semibold text-muted-foreground transition-colors hover:bg-border"
+                  onClick={() => {
+                    setDatePreset("")
+                    setDateFrom("")
+                    setDateTo("")
+                  }}
+                  className="flex h-8 items-center gap-1 rounded-full bg-muted px-3 py-1.5 text-xs font-semibold text-muted-foreground transition-colors hover:bg-border"
                 >
                   <IconX className="size-3" />
                   Clear
