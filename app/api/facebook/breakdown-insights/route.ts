@@ -18,6 +18,7 @@ export async function GET(request: NextRequest) {
   const timeRange     = searchParams.get("time_range")
   const breakdowns    = searchParams.get("breakdowns")
   const timeIncrement = searchParams.get("time_increment")
+  const objectIds     = searchParams.get("object_ids") || ""
 
   if (!adAccountId) {
     return NextResponse.json({ error: "ad_account_id required" }, { status: 400 })
@@ -35,7 +36,7 @@ export async function GET(request: NextRequest) {
   const apiTimeRange = resolveAdsManagerTimeRange(datePreset || "last_7d", timeRange || "")
   const dateKey  = timeRange ? `tr:${timeRange}` : `dp:${datePreset || "last_7d"}`
   const bdsKey   = [breakdowns || "", timeIncrement || ""].filter(Boolean).join(":")
-  const cacheKey = `breakdown-insights:${adAccountId}:${level}:${dateKey}:${bdsKey}`
+  const cacheKey = `breakdown-insights:${adAccountId}:${level}:${dateKey}:${bdsKey}:${objectIds}`
 
   try {
     const data = await getCachedFacebookMetadata(cacheKey, CACHE_TTL, async () => {
@@ -46,11 +47,24 @@ export async function GET(request: NextRequest) {
         "actions", "action_values", "cost_per_action_type",
       ].join(",")
 
+      const filteringList: any[] = [
+        { field: "impressions", operator: "GREATER_THAN", value: 0 }
+      ]
+      if (objectIds) {
+        const idFilterField = level === "campaign" ? "campaign.id" : level === "adset" ? "adset.id" : "ad.id"
+        filteringList.push({
+          field: idFilterField,
+          operator: "IN",
+          value: objectIds.split(",").map(id => id.trim())
+        })
+      }
+
       const params = new URLSearchParams({
         level,
         fields,
         limit: "1000",
         access_token: connection.access_token,
+        filtering: JSON.stringify(filteringList),
       })
 
       if (apiTimeRange)  params.set("time_range", apiTimeRange)

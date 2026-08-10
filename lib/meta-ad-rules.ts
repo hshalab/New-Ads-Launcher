@@ -481,7 +481,7 @@ export interface ParsedRule {
   createdTime?: string
 }
 
-function parseSpec(spec: unknown): any {
+export function parseSpec(spec: unknown): any {
   if (!spec) return null
   if (typeof spec === "string") {
     try {

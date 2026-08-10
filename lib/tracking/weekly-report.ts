@@ -57,6 +57,30 @@ function riskSentence(report: ReportInput): string {
   return risks.length ? risks.join("; ") : "No measured delivery risk in this period."
 }
 
+function appUrl(): string {
+  return process.env.NEXT_PUBLIC_APP_URL || process.env.SERVER_URL || "https://ads.patigroup.com"
+}
+
+/**
+ * Humanizer opinion — the one qualitative read a PM/user would give this number, not
+ * another restated stat. E2E rate IS the app's adoption rate: every ad on Meta launched
+ * outside AdLauncher (no [app] tag) is a user who had to bypass the app to get work done.
+ */
+function humanizerOpinion(report: ReportInput): string {
+  if (report.opinion) return report.opinion
+  const e2e = report.e2e
+  if (!e2e || e2e.e2eRate === null) {
+    return "Humanizer opinion — Adoption rate is unavailable this period, so we can't tell if the team is actually using the app or working around it. Confirm the Meta connection is live before trusting any other number in this report."
+  }
+  if (e2e.e2eRate >= 100) {
+    return "Humanizer opinion — 100% adoption: every ad on Meta this period went through AdLauncher. From a PM lens, the app is not a side tool, it's the only way work gets done here — a strong signal to keep investing in it rather than defending its usage."
+  }
+  if (e2e.e2eRate >= 80) {
+    return `Humanizer opinion — Adoption is high (${e2e.e2eRate}%) but not full: ${e2e.totalAds - e2e.appAds} ads this period skipped the app and went straight to Meta Ads Manager. Worth asking the team directly why — a missing feature or a habit is a very different fix.`
+  }
+  return `Humanizer opinion — Adoption is at ${e2e.e2eRate}%, meaning ${e2e.totalAds - e2e.appAds} of ${e2e.totalAds} ads bypassed AdLauncher entirely. From a user's perspective that's a vote against the app for most of their launches — treat this as a usability or trust gap, not a reporting gap.`
+}
+
 function bucketLabel(bucket: string): string {
   const [year, month, day] = bucket.split("-")
   return year && month && day ? `${day}/${month}` : bucket
@@ -107,7 +131,10 @@ export function buildWeeklyReportEmail({ report, team }: WeeklyReportSnapshot): 
 <body style="margin:0;background:rgb(245,246,248);font-family:Arial,sans-serif;color:rgb(31,35,41)">
   <div style="max-width:720px;margin:24px auto;background:white;border:1px solid rgb(222,224,227);border-radius:12px;overflow:hidden">
     <div style="padding:24px 28px;background:rgb(20,86,240);color:white">
-      <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.8">AdLauncher · ${orgName}</div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <img src="${appUrl()}/icon.png" width="28" height="28" alt="AdLauncher" style="border-radius:6px;background:white;padding:2px;display:block" />
+        <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.8">AdLauncher · ${orgName}</div>
+      </div>
       <h1 style="margin:8px 0 0;font-size:24px">Weekly operating report</h1>
       <p style="margin:6px 0 0;opacity:.85">Last ${report.days} days · generated ${formatDate(date)}</p>
     </div>
@@ -136,6 +163,7 @@ export function buildWeeklyReportEmail({ report, team }: WeeklyReportSnapshot): 
       <div style="padding:14px 16px;background:rgb(242,243,245);border-left:3px solid rgb(20,86,240);border-radius:0 8px 8px 0">
         <b>Management readout</b>
         <p style="margin:6px 0 0;line-height:1.6">${report.e2e && report.e2e.e2eRate !== null ? `${report.e2e.e2eRate}% of ads on Meta this period were launched end-to-end via AdLauncher (${report.e2e.appAds}/${report.e2e.totalAds}). ` : ""}The team delivered ${report.delivery.adsCreated} ads from ${report.delivery.batches} batches at ${report.delivery.successRate}% full-batch success. ${activity ? `${activity.activeMembers} members recorded ${activity.total} measurable app actions across ${activity.activeDays} active days.` : "App activity is not measurable on this project yet."}</p>
+        <p style="margin:8px 0 0;line-height:1.6;font-size:13px;color:rgb(79,70,229)">${escapeHtml(humanizerOpinion(report))}</p>
       </div>
 
       <h2 style="font-size:18px;margin:24px 0 10px">Team usage</h2>
@@ -161,6 +189,7 @@ export function buildWeeklyReportEmail({ report, team }: WeeklyReportSnapshot): 
       ? `E2E launch rate: ${report.e2e.e2eRate}% (${report.e2e.appAds}/${report.e2e.totalAds} Meta ads tagged [app], measured).`
       : "E2E launch rate: unavailable this period.",
     `Executive readout: ${report.e2e && report.e2e.e2eRate !== null ? `${report.e2e.e2eRate}% of Meta ads this period came through AdLauncher. ` : ""}${report.delivery.adsCreated} ads, ${report.delivery.successRate}% full success, ${report.delivery.nonSuccess} batches need review.`,
+    humanizerOpinion(report),
     activity ? `App activity: ${activity.total} actions, ${activity.activeMembers} active members, ${activity.activeDays} active days.` : "App activity: unavailable.",
     `Risk: ${risk}`,
     "Team usage:",

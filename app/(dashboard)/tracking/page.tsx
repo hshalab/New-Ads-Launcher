@@ -604,9 +604,11 @@ export default function TrackingPage() {
   const [weeklyBusy, setWeeklyBusy] = useState(false)
   const [weeklyError, setWeeklyError] = useState<string | null>(null)
   const [emailPreview, setEmailPreview] = useState<WeeklyEmailPreview | null>(null)
+  const [humanizerOpinion, setHumanizerOpinion] = useState("")
 
   const periodQuery = `from=${dateParam(period.from)}&to=${dateParam(period.to)}`
   const days = data?.days ?? inclusiveDays(period)
+  const humanizerOpinionText = humanizerOpinion.trim()
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -715,6 +717,7 @@ export default function TrackingPage() {
     instrumentedSince: activity.instrumentedSince,
     automationRuns: activity.automationRuns,
     automationCoverage: activity.automationCoverage,
+    opinion: humanizerOpinionText || null,
   } : null
   const baseReport = reportInput ? buildTrackingReport(reportInput) : ""
   const weeklyBaseSnapshot = data && data.admin && activity?.team ? {
@@ -732,6 +735,7 @@ export default function TrackingPage() {
       instrumentedSince: activity.instrumentedSince,
       automationRuns: activity.automationRuns,
       automationCoverage: activity.automationCoverage,
+      opinion: humanizerOpinionText || null,
     },
     team: usageRows.map(member => ({
       name: member.name,
@@ -1222,6 +1226,10 @@ export default function TrackingPage() {
                   <div><div className="flex items-center gap-2"><IconMail className="size-5" /><h3 className="font-semibold">Weekly email</h3>{weeklyConfig?.schedule.pending_review && <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-700">Review due</span>}</div><p className="mt-1 text-xs text-muted-foreground">To Kevin, Seth · CC PATI-BOM. Preview approval required before every send.</p></div>
                   <Button onClick={() => void previewWeeklyEmail()} disabled={weeklyBusy || !weeklySnapshot}><IconMail className="size-4" />Preview email</Button>
                 </div>
+                <label className="mt-4 block text-xs font-medium text-muted-foreground">
+                  Humanizer opinion
+                  <textarea value={humanizerOpinion} onChange={event => setHumanizerOpinion(event.target.value)} maxLength={2000} rows={3} placeholder="Nhập nhận định thủ công cho email report. Bỏ trống để app tự viết." className="mt-1 block w-full resize-y rounded-md border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground" />
+                </label>
                 {weeklyConfig && <div className="mt-4 grid gap-3 rounded-lg border bg-background p-4 sm:grid-cols-[auto_1fr_1fr_auto] sm:items-end">
                   <label className="flex items-center gap-2 pb-2 text-sm"><input type="checkbox" checked={weeklyConfig.schedule.enabled} onChange={event => setWeeklyConfig(current => current ? { ...current, schedule: { ...current.schedule, enabled: event.target.checked } } : current)} />Weekly</label>
                   <label className="text-xs text-muted-foreground">Day<select value={weeklyConfig.schedule.weekday} onChange={event => setWeeklyConfig(current => current ? { ...current, schedule: { ...current.schedule, weekday: Number(event.target.value) } } : current)} className="mt-1 block w-full rounded-md border bg-background px-2 py-2 text-sm text-foreground"><option value={1}>Monday</option><option value={2}>Tuesday</option><option value={3}>Wednesday</option><option value={4}>Thursday</option><option value={5}>Friday</option><option value={6}>Saturday</option></select></label>

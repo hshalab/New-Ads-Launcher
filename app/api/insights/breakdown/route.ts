@@ -90,6 +90,7 @@ export async function GET(request: NextRequest) {
           breakdowns: breakdown,
           limit: "100",
           access_token: token,
+          filtering: JSON.stringify([{ field: "impressions", operator: "GREATER_THAN", value: 0 }]),
           ...(!attributionWindows ? { use_account_attribution_setting: "true" } : { action_attribution_windows: attributionWindows }),
         })
         if (since && until) params.set("time_range", JSON.stringify({ since, until }))

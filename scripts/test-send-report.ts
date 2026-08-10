@@ -258,7 +258,7 @@ async function run() {
             bucket,
             totalAds: val.totalAds,
             appAds: val.appAds,
-            e2eRate: val.totalAds > 0 ? Math.round((val.appAds / val.totalAds) * 100) : 100,
+            e2eRate: val.totalAds > 0 ? Math.round((val.appAds / val.totalAds) * 100) : 0,
           }))
           .sort((a, b) => a.bucket.localeCompare(b.bucket)),
       }

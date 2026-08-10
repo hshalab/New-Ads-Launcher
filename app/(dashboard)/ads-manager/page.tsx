@@ -230,6 +230,7 @@ const byNewestFirst = (
 interface BreakdownRow {
   parentId: string
   breakdownLabel: string
+  dateStart?: string
   ins: Insight
 }
 
@@ -1673,9 +1674,14 @@ function AdsManagerContent() {
     const dateParam = buildDateParam()
     const levelMap: Record<string, string> = { campaigns: "campaign", adsets: "adset", ads: "ad" }
     const level = levelMap[tab]
+
+    const currentItems = tab === "campaigns" ? campaigns : tab === "adsets" ? adSets : ads
+    const ids = currentItems.map(item => item.id).filter(Boolean)
+
     let insUrl = `/api/facebook/breakdown-insights?ad_account_id=${encodeURIComponent(selectedAccountId)}&level=${level}&${dateParam}`
     if (allBdsFields.length > 0) insUrl += `&breakdowns=${encodeURIComponent(allBdsFields.join(","))}`
     if (tiValue) insUrl += `&time_increment=${encodeURIComponent(tiValue)}`
+    if (ids.length > 0) insUrl += `&object_ids=${encodeURIComponent(ids.join(","))}`
 
     try {
       const ir = await fetch(insUrl)
@@ -1689,6 +1695,7 @@ function AdsManagerContent() {
           .map((item: any) => ({
             parentId: item[idKey] as string,
             breakdownLabel: getBreakdownLabel(item as Record<string, string>, bds),
+            dateStart: item.date_start || "",
             ins: {
               spend: item.spend || "0",
               impressions: item.impressions || "0",
@@ -1699,13 +1706,14 @@ function AdsManagerContent() {
               cost_per_action_type: item.cost_per_action_type,
             } as Insight,
           }))
+        if (tiValue) rows.sort((x: any, y: any) => y.dateStart.localeCompare(x.dateStart))
         setBreakdownRows(rows)
       }
     } catch (err) {
       console.error("[breakdown-insights] fetch error:", err)
       setBreakdownError("Failed to fetch breakdown data")
     }
-  }, [selectedAccountId, tab, buildDateParam])
+  }, [selectedAccountId, tab, buildDateParam, campaigns, adSets, ads])
 
   const breakdownDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -3033,15 +3041,18 @@ function AdsManagerContent() {
     return getActionCount(ins, actionType)
   }
 
-  function resolveMetricNumber(metricId: string, ins: Insight | null, row: Campaign | AdSet | Ad, objective?: string): number | null {
-    const spend = getSpend(row)
+  function resolveMetricNumberWithSpend(metricId: string, ins: Insight | null, spend: number, objective?: string, row?: Campaign | AdSet | Ad): number | null {
     switch (metricId) {
       case "spend": return spend
-      case "results": return getResults(row, objective).count
-      case "cost_per_result": { const count = getResults(row, objective).count; return count ? spend / count : null }
-      case "budget": return parseFloat((row as any).daily_budget || (row as any).lifetime_budget || "0") / 100
-      case "lifetime_budget": return parseFloat((row as any).lifetime_budget || "0") / 100
-      case "budget_remaining": return parseFloat((row as any).budget_remaining || "0") / 100
+      case "results": {
+        if (!ins?.actions) return 0
+        const obj = OBJECTIVE_RESULT[objective || ""]
+        return obj ? getActionCount(ins, obj.actionType) : parseInt(ins.actions[0]?.value || "0")
+      }
+      case "cost_per_result": { const count = resolveMetricNumberWithSpend("results", ins, spend, objective, row); return count ? spend / count : null }
+      case "budget": return row ? parseFloat((row as any).daily_budget || (row as any).lifetime_budget || "0") / 100 : null
+      case "lifetime_budget": return row ? parseFloat((row as any).lifetime_budget || "0") / 100 : null
+      case "budget_remaining": return row ? parseFloat((row as any).budget_remaining || "0") / 100 : null
       case "impressions": return parseFloat(ins?.impressions || "0")
       case "reach": return parseFloat(ins?.reach || "0")
       case "clicks": return parseFloat(ins?.clicks || "0")
@@ -3081,6 +3092,14 @@ function AdsManagerContent() {
     }
   }
 
+  function resolveMetricNumber(metricId: string, ins: Insight | null, row: Campaign | AdSet | Ad, objective?: string): number | null {
+    return resolveMetricNumberWithSpend(metricId, ins, getSpend(row), objective, row)
+  }
+
+  function resolveBreakdownMetricNumber(metricId: string, ins: Insight | null, objective?: string): number | null {
+    return resolveMetricNumberWithSpend(metricId, ins, parseFloat(ins?.spend || "0"), objective)
+  }
+
   function sortValue(field: string, row: Campaign | AdSet | Ad): number | string | null {
     const r = row as any
     switch (field) {
@@ -3103,9 +3122,33 @@ function AdsManagerContent() {
       }
       default: {
         const obj = tab === "campaigns" ? r.objective : campaigns.find(c => c.id === r.campaign_id)?.objective
+        const customMetric = customMetricById.get(field)
+        if (customMetric) return evalCustomMetric(customMetric.formula, id => resolveMetricNumber(id, getInsight(row), row, obj))
         return resolveMetricNumber(field, getInsight(row), row, obj)
       }
     }
+  }
+
+  function sortBreakdownValue(field: string, row: BreakdownRow, objective?: string): number | string | null {
+    if (field === "name") return row.breakdownLabel
+    if (["schedule_start", "schedule_end", "date_created", "updated_time"].includes(field)) return (row as any).dateStart || ""
+    const customMetric = customMetricById.get(field)
+    if (customMetric) return evalCustomMetric(customMetric.formula, id => resolveBreakdownMetricNumber(id, row.ins, objective))
+    return resolveBreakdownMetricNumber(field, row.ins, objective)
+  }
+
+  function sortedBreakdownRows(parentId: string, objective?: string) {
+    const rows = breakdowns.length > 0 ? breakdownRows.filter(br => br.parentId === parentId) : []
+    if (!sortField) return rows
+    return [...rows].sort((a, b) => {
+      const av = sortBreakdownValue(sortField, a, objective)
+      const bv = sortBreakdownValue(sortField, b, objective)
+      if (typeof av === "string" || typeof bv === "string") {
+        const as = String(av ?? ""), bs = String(bv ?? "")
+        return sortDir === "asc" ? as.localeCompare(bs) : bs.localeCompare(as)
+      }
+      return sortDir === "asc" ? (av as number) - (bv as number) : (bv as number) - (av as number)
+    })
   }
 
   const formatCustomMetric = (value: number | null, format: CustomMetricConfig["format"]) => value == null
@@ -4232,7 +4275,7 @@ function AdsManagerContent() {
                   const bg = rowBg(idx)
                   const isSel = selectedIds.has(c.id)
                   const hasDraft = Boolean(bulkDrafts[bulkDraftKey("campaign", c.id)])
-                  const rowBDs = breakdowns.length > 0 ? breakdownRows.filter(br => br.parentId === c.id) : []
+                  const rowBDs = sortedBreakdownRows(c.id, c.objective)
                   return (
                     <Fragment key={c.id}>
                       <tr className={cn("border-b border-[#e4e6eb] dark:border-gray-800 hover:bg-[#f5f6f7] dark:hover:bg-white/5 transition-colors group/row", bg, hasDraft && !isSel && "bg-emerald-50/80 dark:bg-emerald-950/20 hover:bg-emerald-50/80 dark:hover:bg-emerald-950/20", isSel && "bg-[#e3f0fe] dark:bg-blue-950/30 hover:bg-[#d8e9fc]")}>
@@ -4288,7 +4331,7 @@ function AdsManagerContent() {
                   const isSel = selectedIds.has(a.id)
                   const hasDraft = Boolean(bulkDrafts[bulkDraftKey("adset", a.id)])
                   const objective = campaigns.find(c => c.id === a.campaign_id)?.objective
-                  const rowBDs = breakdowns.length > 0 ? breakdownRows.filter(br => br.parentId === a.id) : []
+                  const rowBDs = sortedBreakdownRows(a.id, objective)
                   return (
                     <Fragment key={a.id}>
                       <tr className={cn("border-b border-[#e4e6eb] dark:border-gray-800 hover:bg-[#f5f6f7] dark:hover:bg-white/5 transition-colors group/row", bg, hasDraft && !isSel && "bg-emerald-50/80 dark:bg-emerald-950/20 hover:bg-emerald-50/80 dark:hover:bg-emerald-950/20", isSel && "bg-[#e3f0fe] dark:bg-blue-950/30 hover:bg-[#d8e9fc]")}>
@@ -4345,7 +4388,7 @@ function AdsManagerContent() {
                   const hasDraft = Boolean(bulkDrafts[bulkDraftKey("ad", a.id)])
                   const thumb = a.creative?.thumbnail_url || a.creative?.image_url
                   const objective = campaigns.find(c => c.id === a.campaign_id)?.objective
-                  const rowBDs = breakdowns.length > 0 ? breakdownRows.filter(br => br.parentId === a.id) : []
+                  const rowBDs = sortedBreakdownRows(a.id, objective)
                   return (
                     <Fragment key={a.id}>
                       <tr className={cn("border-b border-[#e4e6eb] dark:border-gray-800 hover:bg-[#f5f6f7] dark:hover:bg-white/5 transition-colors group/row", bg, hasDraft && !isSel && "bg-emerald-50/80 dark:bg-emerald-950/20 hover:bg-emerald-50/80 dark:hover:bg-emerald-950/20", isSel && "bg-[#e3f0fe] dark:bg-blue-950/30 hover:bg-[#d8e9fc]")}>

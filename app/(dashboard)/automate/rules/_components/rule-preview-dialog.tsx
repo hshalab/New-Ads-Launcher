@@ -12,6 +12,12 @@ interface PreviewEntity {
   effective_status?: string
 }
 
+function conditionBullets(text: string): string[] {
+  const prefix = "If "
+  if (!text.startsWith(prefix)) return [text]
+  return text.slice(prefix.length).split(" and ")
+}
+
 /**
  * "If your rule were to run now, what would it touch?"
  *
@@ -93,9 +99,13 @@ export function RulePreviewDialog({
         </div>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
-          <div className="text-sm">
+          <div className="text-sm space-y-1">
             <div className="font-medium">{actionLabel}</div>
-            <div className="text-muted-foreground">{conditionText}</div>
+            <ul className="list-disc pl-5 text-muted-foreground space-y-1 mt-1">
+              {conditionBullets(conditionText).map((cond, idx) => (
+                <li key={idx}>{cond}</li>
+              ))}
+            </ul>
           </div>
 
           {loading ? (

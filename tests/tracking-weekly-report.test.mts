@@ -13,7 +13,7 @@ const report = {
   failureReasons: [{ label: "Meta rejected <img src=x onerror=alert(1)>", count: 2 }],
   activity: {
     total: 31,
-    byClass: { produce: 8, launch: 10, control: 7, reuse: 4, govern: 2 },
+    byClass: { produce: 8, launch: 10, control: 7, reuse: 4, govern: 2, collaborate: 0 },
     byType: [],
     activeMembers: 3,
     activeDays: 5,
@@ -39,12 +39,12 @@ test("builds the approved weekly subject and an escaped management report", () =
   })
 
   assert.equal(email.subject, "[INFORM - Tech/Raymond] AdLauncher Weekly Report (07/08/2026)")
-  assert.match(email.html, /Executive summary/)
+  assert.match(email.html, /Management readout/)
   assert.match(email.html, /Team usage/)
   assert.match(email.html, /App activity/)
   assert.doesNotMatch(email.html, /KR tracking|75\/100|recorded fallbacks/)
   assert.match(email.html, /Kevin/)
-  assert.doesNotMatch(email.html, /<script>|<img/)
+  assert.doesNotMatch(email.html, /<script>|<img src=x/)
   assert.match(email.html, /&lt;script&gt;/)
 })
 
@@ -72,4 +72,14 @@ test("report delivery keeps preview and admin gates visible in code", async () =
   assert.match(cron, /pending_review/)
   assert.match(migration, /is_org_admin\(org_id\)/)
   assert.doesNotMatch(page, /<pre className=/)
+})
+
+test("buildWeeklyReportEmail respects custom humanizer opinion override", () => {
+  const customOpinion = "This is a custom humanizer opinion from Seth."
+  const email = buildWeeklyReportEmail({
+    report: { ...report, opinion: customOpinion },
+    team: [],
+  })
+  assert.match(email.html, /This is a custom humanizer opinion from Seth\./)
+  assert.doesNotMatch(email.html, /Humanizer opinion — Adoption rate is unavailable/)
 })

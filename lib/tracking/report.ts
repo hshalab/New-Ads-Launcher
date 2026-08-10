@@ -53,6 +53,8 @@ export type ReportInput = {
   instrumentedSince: string | null
   automationRuns: number
   automationCoverage: number | null
+  /** Admin-written override for the email's Humanizer opinion line. Falls back to the auto-generated read when blank. */
+  opinion?: string | null
 }
 
 /**

@@ -34,6 +34,7 @@ function parseSnapshot(value: unknown): WeeklyReportSnapshot | null {
   const snapshot = value as WeeklyReportSnapshot
   const report = snapshot.report
   if (!report || !Number.isInteger(report.days) || !finite(report.days, 1, 366) || !Number.isFinite(new Date(report.generatedAt).getTime())) return null
+  if (report.opinion !== undefined && report.opinion !== null && (typeof report.opinion !== "string" || report.opinion.length > 2000)) return null
   if (!report.delivery || !finite(report.delivery.batches) || !finite(report.delivery.adsCreated) || !finite(report.delivery.successRate, 0, 100)) return null
   if (!report.previous || !report.creative || !Array.isArray(report.failureReasons) || report.failureReasons.length > 20) return null
   if (report.e2e !== null && report.e2e !== undefined) {
