@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getAuthContext, getConnectionForAdAccount, isManual, MissingViaError, requireRole } from "@/lib/auth"
-import { updateNode } from "@/lib/facebook"
+import { getNodeTargeting, updateNode } from "@/lib/facebook"
+import { mergeEditorTargeting } from "@/lib/targeting-merge"
 import { assertMetaNodeUnchanged } from "@/lib/optimistic-update"
 import { emitAndLog } from "@/lib/notifications/emit"
 import { diffFields, formatMoneyMinor } from "@/lib/notifications/message"
@@ -127,6 +128,16 @@ export async function POST(request: NextRequest) {
 
     const before = check.ok ? check.node : null
 
+    // TD-37: same hazard as workspace-publish. Callers pass the ad set node they have in hand,
+    // which is hydrated from a partial targeting read, and Meta replaces `targeting` wholesale.
+    // Re-read, overlay only editor-owned keys, and drop the key entirely when nothing moved.
+    let mergedTargeting: unknown = targeting
+    if (level === "adset" && targeting !== undefined) {
+      const remoteTargeting = await getNodeTargeting(id, connection.access_token, { isManual: isManual(connection) })
+      const merge = mergeEditorTargeting(remoteTargeting, targeting)
+      mergedTargeting = merge.changed ? merge.targeting : undefined
+    }
+
     const payload = {
       name,
       status,
@@ -139,7 +150,7 @@ export async function POST(request: NextRequest) {
       bid_amount,
       attribution_spec,
       promoted_object,
-      targeting,
+      targeting: mergedTargeting,
       publisher_platforms,
       device_platforms,
       facebook_positions,

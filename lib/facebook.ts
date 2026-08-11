@@ -2531,6 +2531,31 @@ export async function getCampaignInsights(
   return data.data || []
 }
 
+/**
+ * Read an ad set's *complete* targeting spec straight from Meta.
+ *
+ * Unlike the editor's detail read this requests `targeting` whole, with no sub-selection, so
+ * the result carries the keys the editor never renders. Callers merge onto this before writing
+ * — see `lib/targeting-merge.ts` and TD-37.
+ */
+export async function getNodeTargeting(
+  nodeId: string,
+  accessToken: string,
+  opts?: { isManual?: boolean }
+): Promise<unknown> {
+  const res = await secureMetaFetch(
+    `${GRAPH_API_BASE}/${nodeId}?fields=targeting&access_token=${encodeURIComponent(accessToken)}`,
+    undefined,
+    { skipProof: opts?.isManual }
+  )
+  if (!res.ok) {
+    const error = await res.json().catch(() => null)
+    throw new Error(error?.error?.message || "Failed to read current targeting")
+  }
+  const data = await res.json()
+  return data?.targeting
+}
+
 // Update a node (Campaign, AdSet, or Ad)
 export async function updateNode(
   nodeId: string,

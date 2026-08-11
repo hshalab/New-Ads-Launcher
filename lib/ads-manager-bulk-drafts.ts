@@ -162,6 +162,51 @@ export function draftChangeLabels(draft: BulkEditDraft): string[] {
   return labels
 }
 
+export function workspaceDraftChangeLabels(
+  draft: Record<string, unknown>,
+  original?: Record<string, unknown> | null,
+): string[] {
+  if (!original) return ["Staged edits"]
+  const labels: string[] = []
+  const pushIfChanged = (key: string, label: string, format?: (v: unknown) => string) => {
+    const next = draft[key]
+    const prev = original[key]
+    if (JSON.stringify(next) === JSON.stringify(prev)) return
+    if (next === undefined) return
+    labels.push(format ? `${label}: ${format(next)}` : `${label}: ${String(next ?? "—")}`)
+  }
+  pushIfChanged("name", "Name")
+  if (draft.status !== original.status && draft.status !== undefined) {
+    labels.push(draft.status === "ACTIVE" ? "Turn on" : "Turn off")
+  }
+  const budgetFmt = (v: unknown) => `$${(Number(v) / 100).toFixed(2)}`
+  pushIfChanged("daily_budget", "Daily budget", budgetFmt)
+  pushIfChanged("lifetime_budget", "Lifetime budget", budgetFmt)
+  pushIfChanged("start_time", "Start")
+  pushIfChanged("stop_time", "End")
+  pushIfChanged("end_time", "End")
+  pushIfChanged("optimization_goal", "Performance goal")
+  pushIfChanged("bid_strategy", "Bid strategy")
+  pushIfChanged("bid_amount", "Bid amount", budgetFmt)
+  pushIfChanged("primaryText", "Primary text")
+  pushIfChanged("headline", "Headline")
+  pushIfChanged("description", "Description")
+  pushIfChanged("link", "Destination URL")
+  pushIfChanged("cta", "Call to action")
+  pushIfChanged("page_id", "Page")
+  if (draft.creative_edit === true) labels.push("Creative reassignment")
+  if (JSON.stringify(draft.targeting) !== JSON.stringify(original.targeting)) labels.push("Audience / placements")
+  if (JSON.stringify(draft.attribution_spec) !== JSON.stringify(original.attribution_spec)) labels.push("Attribution")
+  if (JSON.stringify(draft.promoted_object) !== JSON.stringify(original.promoted_object)) labels.push("Promoted object")
+  pushIfChanged("objective", "Objective")
+  pushIfChanged("buying_type", "Buying type")
+  if (JSON.stringify(draft.special_ad_categories) !== JSON.stringify(original.special_ad_categories)) {
+    labels.push("Special Ad Categories")
+  }
+  pushIfChanged("conversion_location", "Conversion location")
+  return labels.length ? labels : ["Staged edits"]
+}
+
 export function orderedDrafts(drafts: BulkEditDraft[]): BulkEditDraft[] {
   const order: Record<BulkDraftLevel, number> = { campaign: 0, adset: 1, ad: 2 }
   return [...drafts].sort((a, b) => order[a.level] - order[b.level] || a.name.localeCompare(b.name))

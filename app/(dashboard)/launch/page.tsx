@@ -13,6 +13,7 @@ import { useAdAccount } from "@/lib/ad-account-context"
 import { useOrg } from "@/lib/org-context"
 import { cn, proxyFbImage } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { LoadMoreButton } from "@/components/ui/load-more-button"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import {
@@ -10157,13 +10158,12 @@ function LaunchHistorySection({ reloadTrigger, onRelaunch, onLoadDraft, tabOverr
             </div>
           ))}
           {displayCount < filtered.length && (
-            <div className="flex justify-center py-3 border-t">
-              <Button variant="ghost" size="sm" className="text-xs gap-1.5 text-muted-foreground hover:text-foreground"
-                onClick={() => setDisplayCount(c => c + 15)}>
-                <IconChevronDown className="size-3.5" />
-                Load more ({filtered.length - displayCount} more)
-              </Button>
-            </div>
+            <LoadMoreButton
+              variant="ghost"
+              remaining={filtered.length - displayCount}
+              onClick={() => setDisplayCount(c => c + 15)}
+              className="py-3 border-t"
+            />
           )}
         </>}
       </div>

@@ -17,6 +17,7 @@ import {
 import type { Level, ReportRow } from "./InsightDrawers"
 import { AdsDateRangePicker } from "./AdsDateRangePicker"
 import { UnifiedWorkspaceEditor, type WorkspaceNode } from "./UnifiedWorkspaceEditor"
+import { workspaceDraftChangeLabels } from "@/lib/ads-manager-bulk-drafts"
 
 type Tab = "trends" | "breakdowns"
 
@@ -398,6 +399,17 @@ export function PerformancePopup({
 
   const updateWorkspaceDraft = useCallback((node: WorkspaceNode, nodeLevel: Level) => {
     setWorkspaceDrafts(current => ({ ...current, [`${nodeLevel}:${node.id}`]: node }))
+    setWorkspacePublishResults([])
+  }, [])
+
+  const discardWorkspaceDraft = useCallback((nodeLevel: Level, id: string) => {
+    const key = `${nodeLevel}:${id}`
+    setWorkspaceDrafts(current => {
+      if (!current[key]) return current
+      const next = { ...current }
+      delete next[key]
+      return next
+    })
     setWorkspacePublishResults([])
   }, [])
 
@@ -1203,7 +1215,7 @@ export function PerformancePopup({
           <div className="flex items-center justify-between px-5 py-3 border-b shrink-0">
             <div className="min-w-0">
               <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                {effectiveWorkspaceView === "charts" ? "Charts" : effectiveWorkspaceView === "edit" ? "Edit" : effectiveWorkspaceView === "review" ? "Review" : "Activity history"}
+                {effectiveWorkspaceView === "charts" ? "Charts" : effectiveWorkspaceView === "edit" ? "Edit" : effectiveWorkspaceView === "review" ? "Review and publish" : "Activity history"}
               </p>
               <h2 className="font-semibold text-base truncate" title={headerTitle}>
                 {effectiveWorkspaceView === "charts" ? headerTitle : (capped[0]?.name || headerTitle)}
@@ -1220,7 +1232,6 @@ export function PerformancePopup({
               {[
                 { view: "charts" as const, label: "Charts", icon: IconChartLine },
                 { view: "edit" as const, label: "Edit", icon: IconPencil },
-                { view: "review" as const, label: "Review", icon: IconListCheck },
                 { view: "history" as const, label: "History", icon: IconHistory },
               ].map(item => (
                 <button
@@ -1241,6 +1252,23 @@ export function PerformancePopup({
                   <item.icon className="size-4.5" />
                 </button>
               ))}
+              {workspaceDirty && (
+                <button
+                  type="button"
+                  onClick={() => setWorkspaceView("review")}
+                  className={cn(
+                    "relative grid size-9 place-items-center rounded-lg text-slate-300 transition-colors hover:bg-white/10 hover:text-white",
+                    workspaceView === "review" && "bg-white/15 text-white"
+                  )}
+                  aria-label={`Review and publish (${Object.keys(workspaceDrafts).length})`}
+                  title={`Review and publish (${Object.keys(workspaceDrafts).length})`}
+                >
+                  <IconListCheck className="size-4.5" />
+                  <span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-emerald-500 px-1 text-[10px] font-bold text-white">
+                    {Object.keys(workspaceDrafts).length}
+                  </span>
+                </button>
+              )}
               <div className="flex-1" />
               <button
                 type="button"
@@ -1280,28 +1308,74 @@ export function PerformancePopup({
                   </div>
                 )}
                 <div className="space-y-1 text-xs">
-                  {activeCampaign && (
-                    <div onClick={() => selectNode(activeCampaign.id, "campaign")} className={cn("flex items-center justify-between gap-2 rounded-md px-2 py-1.5 cursor-pointer text-blue-600 dark:text-blue-400 hover:bg-muted/40", activeCampaign.id === activeId && "bg-primary/10 text-primary")}>
-                      <span className="truncate font-medium text-slate-900 dark:text-white">📁 {activeCampaign.name}</span>
-                      <NodeActionMenu level="campaign" id={activeCampaign.id} onDuplicate={onDuplicate} onDelete={onDelete} onEdit={unifiedWorkspace ? (id) => openWorkspaceEditor(id, "campaign") : onEdit} onViewHistory={onViewHistory} onSeeHistory={seeHistoryLocal} />
-                    </div>
-                  )}
-                  {treeAdSets.map(as => (
-                    <div key={as.id} className="ml-4">
-                      <div onClick={() => selectNode(as.id, "adset")} className={cn("flex items-center justify-between gap-2 rounded-md px-2 py-1.5 cursor-pointer text-blue-600 dark:text-blue-400 hover:bg-muted/40", as.id === activeId && "bg-primary/10 text-primary")}>
-                            <span className="truncate text-slate-900 dark:text-white">▦ {as.name}</span>
-                        <NodeActionMenu level="ad set" id={as.id} onDuplicate={onDuplicate} onDelete={onDelete} onEdit={unifiedWorkspace ? (id) => openWorkspaceEditor(id, "adset") : onEdit} onViewHistory={onViewHistory} onSeeHistory={seeHistoryLocal} />
+                  {activeCampaign && (() => {
+                    const draftKey = `campaign:${activeCampaign.id}`
+                    const hasDraft = Boolean(workspaceDrafts[draftKey])
+                    const draftName = workspaceDrafts[draftKey]?.name
+                    return (
+                      <div
+                        onClick={() => selectNode(activeCampaign.id, "campaign")}
+                        className={cn(
+                          "flex items-center justify-between gap-2 rounded-md px-2 py-1.5 cursor-pointer text-blue-600 dark:text-blue-400 hover:bg-muted/40",
+                          activeCampaign.id === activeId && "bg-primary/10 text-primary",
+                          hasDraft && "bg-emerald-50 ring-1 ring-emerald-200 dark:bg-emerald-950/30 dark:ring-emerald-800",
+                        )}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <span className="block truncate font-medium text-slate-900 dark:text-white">📁 {draftName || activeCampaign.name}</span>
+                          {hasDraft && <span className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400">Unpublished edits</span>}
+                        </div>
+                        <NodeActionMenu level="campaign" id={activeCampaign.id} onDuplicate={onDuplicate} onDelete={onDelete} onEdit={unifiedWorkspace ? (id) => openWorkspaceEditor(id, "campaign") : onEdit} onViewHistory={onViewHistory} onSeeHistory={seeHistoryLocal} />
                       </div>
-                      <div className="ml-4 space-y-1">
-                        {treeAds(as.id).map(ad => (
-                          <div key={ad.id} onClick={() => selectNode(ad.id, "ad")} className={cn("flex items-center justify-between gap-2 rounded-md px-2 py-1.5 cursor-pointer text-blue-600 dark:text-blue-400 hover:bg-muted/40", ad.id === activeId && "bg-primary/10 text-primary")}>
-                                <span className="truncate text-slate-900 dark:text-white">▣ {ad.name}</span>
-                            <NodeActionMenu level="ad" id={ad.id} onDuplicate={onDuplicate} onDelete={onDelete} onEdit={unifiedWorkspace ? (id) => openWorkspaceEditor(id, "ad") : onEdit} onViewHistory={onViewHistory} onSeeHistory={seeHistoryLocal} />
+                    )
+                  })()}
+                  {treeAdSets.map(as => {
+                    const draftKey = `adset:${as.id}`
+                    const hasDraft = Boolean(workspaceDrafts[draftKey])
+                    const draftName = workspaceDrafts[draftKey]?.name
+                    return (
+                      <div key={as.id} className="ml-4">
+                        <div
+                          onClick={() => selectNode(as.id, "adset")}
+                          className={cn(
+                            "flex items-center justify-between gap-2 rounded-md px-2 py-1.5 cursor-pointer text-blue-600 dark:text-blue-400 hover:bg-muted/40",
+                            as.id === activeId && "bg-primary/10 text-primary",
+                            hasDraft && "bg-emerald-50 ring-1 ring-emerald-200 dark:bg-emerald-950/30 dark:ring-emerald-800",
+                          )}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <span className="block truncate text-slate-900 dark:text-white">▦ {draftName || as.name}</span>
+                            {hasDraft && <span className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400">Unpublished edits</span>}
                           </div>
-                        ))}
+                          <NodeActionMenu level="ad set" id={as.id} onDuplicate={onDuplicate} onDelete={onDelete} onEdit={unifiedWorkspace ? (id) => openWorkspaceEditor(id, "adset") : onEdit} onViewHistory={onViewHistory} onSeeHistory={seeHistoryLocal} />
+                        </div>
+                        <div className="ml-4 space-y-1">
+                          {treeAds(as.id).map(ad => {
+                            const adDraftKey = `ad:${ad.id}`
+                            const adHasDraft = Boolean(workspaceDrafts[adDraftKey])
+                            const adDraftName = workspaceDrafts[adDraftKey]?.name
+                            return (
+                              <div
+                                key={ad.id}
+                                onClick={() => selectNode(ad.id, "ad")}
+                                className={cn(
+                                  "flex items-center justify-between gap-2 rounded-md px-2 py-1.5 cursor-pointer text-blue-600 dark:text-blue-400 hover:bg-muted/40",
+                                  ad.id === activeId && "bg-primary/10 text-primary",
+                                  adHasDraft && "bg-emerald-50 ring-1 ring-emerald-200 dark:bg-emerald-950/30 dark:ring-emerald-800",
+                                )}
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <span className="block truncate text-slate-900 dark:text-white">▣ {adDraftName || ad.name}</span>
+                                  {adHasDraft && <span className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400">Unpublished edits</span>}
+                                </div>
+                                <NodeActionMenu level="ad" id={ad.id} onDuplicate={onDuplicate} onDelete={onDelete} onEdit={unifiedWorkspace ? (id) => openWorkspaceEditor(id, "ad") : onEdit} onViewHistory={onViewHistory} onSeeHistory={seeHistoryLocal} />
+                              </div>
+                            )
+                          })}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                   {!activeCampaign && !activeAdSet && (
                     <p className="text-xs text-muted-foreground px-2 py-4">No hierarchy data loaded.</p>
                   )}
@@ -1314,8 +1388,8 @@ export function PerformancePopup({
               </button>
             )}
             <div ref={workspaceContentRef} className={cn(
-              "flex-1 overflow-y-auto",
-              effectiveWorkspaceView === "edit" ? "" : "px-5 py-4 space-y-5"
+              "flex-1 min-h-0",
+              effectiveWorkspaceView === "edit" ? "overflow-hidden" : "overflow-y-auto px-5 py-4 space-y-5"
             )}>
             {effectiveWorkspaceView === "edit" ? (
               <UnifiedWorkspaceEditor
@@ -1329,25 +1403,46 @@ export function PerformancePopup({
                 onRefresh={() => setWorkspaceDetailRefresh(value => value + 1)}
                 onDraftChange={updateWorkspaceDraft}
                 accountId={accountId}
+                hierarchyPath={{
+                  campaign: workspaceDrafts[`campaign:${activeCampaign?.id || ""}`]?.name || activeCampaign?.name,
+                  adset: workspaceDrafts[`adset:${activeAdSet?.id || ""}`]?.name || activeAdSet?.name,
+                  ad: workspaceDrafts[`ad:${activeAd?.id || ""}`]?.name || activeAd?.name,
+                }}
+                hasDraft={Boolean(activeId && workspaceDrafts[`${activeNodeLevel}:${activeId}`])}
+                onClose={requestWorkspaceClose}
+                onDiscard={() => {
+                  if (!activeId) return
+                  discardWorkspaceDraft(activeNodeLevel, activeId)
+                }}
+                onPublish={() => {
+                  void publishWorkspaceChanges()
+                }}
+                publishing={workspacePublishing}
               />
             ) : effectiveWorkspaceView === "review" ? (
               <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                 <section className="rounded-xl border bg-card p-5">
                   <div className="mb-3 flex items-center gap-2">
                     <IconEye className="size-4 text-primary" />
-                    <h3 className="font-semibold">Review changes</h3>
+                    <h3 className="font-semibold">
+                      Review and publish ({Object.keys(workspaceDrafts).length})
+                    </h3>
                   </div>
                   <p className="text-sm text-muted-foreground">
-                    Publish runs Campaign → Ad Set → Ad. A failed parent skips descendants; successful changes are not rolled back.
+                    Meta is not updated until you publish. Publish runs Campaign → Ad Set → Ad. A failed parent skips descendants; successful changes are not rolled back.
                   </p>
                   <div className="mt-4 space-y-2">
                     {Object.entries(workspaceDrafts).length === 0 ? (
-                      <p className="rounded-lg border bg-muted/20 px-3 py-6 text-center text-sm text-muted-foreground">No staged changes.</p>
+                      <p className="rounded-lg border bg-muted/20 px-3 py-6 text-center text-sm text-muted-foreground">No staged drafts.</p>
                     ) : Object.entries(workspaceDrafts).map(([key, node]) => {
                       const nodeLevel = key.split(":")[0] as Level
                       const result = workspacePublishResults.find(item => item.id === node.id && item.level === nodeLevel)
+                      const changeLabels = workspaceDraftChangeLabels(
+                        node as unknown as Record<string, unknown>,
+                        (workspaceDetails[key] || null) as Record<string, unknown> | null,
+                      )
                       return (
-                        <div key={key} className="rounded-lg border px-3 py-2 text-sm">
+                        <div key={key} className="rounded-lg border border-emerald-200 bg-emerald-50/40 px-3 py-2 text-sm dark:border-emerald-900 dark:bg-emerald-950/20">
                           <div className="flex items-center justify-between gap-3">
                             <div className="min-w-0">
                               <p className="truncate font-medium">{node.name}</p>
@@ -1362,6 +1457,11 @@ export function PerformancePopup({
                               )}>{result.status}</span>
                             )}
                           </div>
+                          <ul className="mt-2 space-y-0.5 text-xs text-muted-foreground">
+                            {changeLabels.map(label => (
+                              <li key={label}>· {label}</li>
+                            ))}
+                          </ul>
                           {result?.message && <p className="mt-1 text-xs text-red-600">{result.message}</p>}
                         </div>
                       )
@@ -1376,7 +1476,7 @@ export function PerformancePopup({
                       }}
                       disabled={workspacePublishing || Object.keys(workspaceDrafts).length === 0}
                       className="h-9 rounded-lg border px-3 text-sm hover:bg-muted/50 disabled:opacity-40"
-                    >Discard draft</button>
+                    >Discard drafts</button>
                     <button
                       onClick={() => {
                         if (structuralReplacement) {
@@ -1393,11 +1493,11 @@ export function PerformancePopup({
                           ? "Create replacement"
                           : workspacePublishResults.some(result => result.status !== "published")
                             ? "Retry failed"
-                            : "Publish"}</button>
+                            : `Publish ${Object.keys(workspaceDrafts).length} draft(s)`}</button>
                   </div>
                 </section>
                 <section className="rounded-xl border bg-card p-5">
-                  <h3 className="font-semibold">Recommendations</h3>
+                  <h3 className="font-semibold">Before you publish</h3>
                   <ul className="mt-3 space-y-2 text-sm text-muted-foreground">
                     {Object.values(workspaceDrafts).some(node => node.status === "ACTIVE") && (
                       <li className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800">At least one object will become Active and may begin spending.</li>
@@ -1407,8 +1507,8 @@ export function PerformancePopup({
                         Objective, buying type, special category, or conversion location changed. Meta requires a replacement hierarchy; the existing hierarchy will remain untouched.
                       </li>
                     )}
-                    <li className="rounded-lg border px-3 py-2">Advanced fields remain unchanged unless they appear in the staged draft.</li>
-                    <li className="rounded-lg border px-3 py-2">No estimated uplift is shown without measured evidence.</li>
+                    <li className="rounded-lg border px-3 py-2">Staged drafts match Quick edit: nothing hits Meta until Publish.</li>
+                    <li className="rounded-lg border px-3 py-2">Hierarchy nodes with unpublished edits show a green marker in the sidebar.</li>
                   </ul>
                 </section>
               </div>

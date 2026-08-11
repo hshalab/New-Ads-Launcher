@@ -16,6 +16,11 @@ interface Creative {
   status?: "pending" | "processing" | "ready" | "error"
 }
 
+// Session-lived caches — survive remounts when navigating Assets/Portal/Vault.
+const posterCache = new Map<string, string>()
+const failedImageCache = new Set<string>()
+const captureInFlight = new Set<string>()
+
 // Capture a JPEG frame from a video URL via Canvas API (client-side, no Meta API call).
 // Uses a hidden <video crossOrigin="anonymous"> so canvas.toBlob() is not tainted.
 // Silently fails if Supabase Storage hasn't configured CORS for the app origin.
@@ -70,8 +75,8 @@ async function captureFrameFromUrl(videoUrl: string, creativeId: string): Promis
 
 export function CreativeCardMedia({ creative, className = "h-full w-full object-cover", compact = false, eager = false }: { creative: Creative, className?: string, compact?: boolean, eager?: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null)
-  const [imgFailed, setImgFailed] = useState(false)
-  const [capturedPoster, setCapturedPoster] = useState<string | null>(null)
+  const [imgFailed, setImgFailed] = useState(() => failedImageCache.has(creative.id))
+  const [capturedPoster, setCapturedPoster] = useState<string | null>(() => posterCache.get(creative.id) ?? null)
   const captureStartedRef = useRef(false)
 
   const isVideo = creative.media_type === "video"
@@ -110,34 +115,46 @@ export function CreativeCardMedia({ creative, className = "h-full w-full object-
 
   const playable = !isPendingVideo && !!(cleanVideoSrc && (/^(blob|data|https?):/.test(cleanVideoSrc) || cleanVideoSrc.startsWith("/")) && (isVideoFile(cleanVideoSrc) || isVideo))
 
+  // Hydrate from session cache when creative id changes (list remount / revisit).
+  useEffect(() => {
+    const cached = posterCache.get(creative.id)
+    if (cached && cached !== capturedPoster) setCapturedPoster(cached)
+    if (failedImageCache.has(creative.id)) setImgFailed(true)
+    captureStartedRef.current = posterCache.has(creative.id) || captureInFlight.has(creative.id)
+  }, [creative.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Trigger client-side canvas capture when video is playable but has no real cached thumbnail.
   useEffect(() => {
     if (!isVideo || !playable || hasRealPoster || capturedPoster || captureStartedRef.current) return
     if (!cleanVideoSrc || (!cleanVideoSrc.startsWith("https://") && !isCreativeMediaRoute(cleanVideoSrc))) return
     if (isSupabaseStorageUrl(cleanVideoSrc)) return
+    if (posterCache.has(creative.id)) {
+      setCapturedPoster(posterCache.get(creative.id)!)
+      return
+    }
+    if (captureInFlight.has(creative.id)) return
     captureStartedRef.current = true
+    captureInFlight.add(creative.id)
 
     let cancelled = false
     captureFrameFromUrl(cleanVideoSrc, creative.id).then((url) => {
-      if (!cancelled && url) setCapturedPoster(url)
+      captureInFlight.delete(creative.id)
+      if (!url) return
+      posterCache.set(creative.id, url)
+      if (!cancelled) setCapturedPoster(url)
     })
 
     return () => { cancelled = true }
   }, [isVideo, playable, hasRealPoster, capturedPoster, cleanVideoSrc, creative.id])
 
-  // Revoke object URL on unmount to avoid memory leaks
-  useEffect(() => {
-    return () => {
-      if (capturedPoster?.startsWith("blob:")) URL.revokeObjectURL(capturedPoster)
-    }
-  }, [capturedPoster])
+  // Blob URLs live in posterCache for the session — do not revoke on unmount.
 
   if (!isVideo) {
     const imgSrc = stableImageUrl || creative.fb_image_url || creative.fb_thumbnail_url || cleanVideoSrc
     return (
       <div className="relative h-full w-full">
         {imgSrc && !imgFailed ? (
-          <img src={imgSrc} alt={creative.file_name} className={className} loading={eager ? "eager" : "lazy"} onError={() => setImgFailed(true)} />
+          <img src={imgSrc} alt={creative.file_name} className={className} loading={eager ? "eager" : "lazy"} onError={() => { failedImageCache.add(creative.id); setImgFailed(true) }} />
         ) : (
           <div className={`${className} flex items-center justify-center bg-muted`}>
             <IconPhoto className="size-6 text-muted-foreground/40" />
@@ -232,7 +249,7 @@ export function CreativeCardMedia({ creative, className = "h-full w-full object-
   if (metaThumb && !imgFailed) {
     return (
       <div className="relative h-full w-full">
-        <img src={metaThumb} alt={creative.file_name} className={className} loading={eager ? "eager" : "lazy"} onError={() => setImgFailed(true)} />
+        <img src={metaThumb} alt={creative.file_name} className={className} loading={eager ? "eager" : "lazy"} onError={() => { failedImageCache.add(creative.id); setImgFailed(true) }} />
         {isGDrive && (
           <div className="absolute bottom-1.5 right-1.5 rounded bg-white/90 p-1 shadow-sm backdrop-blur-sm">
             <IconBrandGoogleDrive className="size-4 text-[#4285F4]" />

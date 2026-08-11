@@ -1,6 +1,7 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react"
+import { createPortal } from "react-dom"
 import { cn } from "@/lib/utils"
 import { IconCalendar, IconChevronDown, IconChevronLeft, IconChevronRight } from "@tabler/icons-react"
 
@@ -186,14 +187,21 @@ interface Props {
   autoApply?: boolean
   /** Hide the selected range label on the trigger button. */
   hideLabel?: boolean
+  /** Include an "All time" preset that emits empty string (Assets filter). */
+  allowAllTime?: boolean
+  allTimeLabel?: string
   onClose?: () => void
 }
 
 type Mode = "preset" | "custom"
 
+const PANEL_W = 600
+const PANEL_MARGIN = 8
+
 export function AdsDateRangePicker({
   preset, customStart, customEnd, accountId, onChange,
-  inline = false, autoApply = false, hideLabel = false, onClose,
+  inline = false, autoApply = false, hideLabel = false,
+  allowAllTime = false, allTimeLabel = "All time", onClose,
 }: Props) {
   const [maxStart, setMaxStart] = useState<Date | null>(null)
   const [open,        setOpen]        = useState(inline)
@@ -205,7 +213,42 @@ export function AdsDateRangePicker({
   const [hoverDate,   setHoverDate]   = useState<Date | null>(null)
   const [leftYear,    setLeftYear]    = useState(new Date().getFullYear())
   const [leftMonth,   setLeftMonth]   = useState(new Date().getMonth())
+  const [panelPos,    setPanelPos]    = useState<{ top: number; left: number } | null>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const [mounted, setMounted] = useState(false)
+
+  useEffect(() => { setMounted(true) }, [])
+
+  const placePanel = useCallback(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    // Prefer right-align under trigger; clamp so full panel stays in viewport.
+    let left = r.right - PANEL_W
+    if (left < PANEL_MARGIN) left = PANEL_MARGIN
+    if (left + PANEL_W > vw - PANEL_MARGIN) left = Math.max(PANEL_MARGIN, vw - PANEL_W - PANEL_MARGIN)
+    let top = r.bottom + 4
+    // Flip above if not enough room below (panel ~420px tall).
+    if (top + 420 > vh - PANEL_MARGIN && r.top > 420) {
+      top = Math.max(PANEL_MARGIN, r.top - 420 - 4)
+    }
+    setPanelPos({ top, left })
+  }, [])
+
+  useLayoutEffect(() => {
+    if (!open || inline) return
+    placePanel()
+    const onResize = () => placePanel()
+    window.addEventListener("resize", onResize)
+    window.addEventListener("scroll", onResize, true)
+    return () => {
+      window.removeEventListener("resize", onResize)
+      window.removeEventListener("scroll", onResize, true)
+    }
+  }, [open, inline, placePanel])
 
   const rightYear  = leftMonth === 11 ? leftYear + 1 : leftYear
   const rightMonth = leftMonth === 11 ? 0 : leftMonth + 1
@@ -220,6 +263,11 @@ export function AdsDateRangePicker({
       setRangeEnd(customEnd)
       setLeftYear(customStart.getFullYear())
       setLeftMonth(customStart.getMonth())
+    } else if (preset === "" && allowAllTime) {
+      setMode("preset")
+      setPending("")
+      setRangeStart(null)
+      setRangeEnd(null)
     } else {
       setMode("preset")
       setPending(preset)
@@ -251,12 +299,17 @@ export function AdsDateRangePicker({
   }, [maxStart]) // eslint-disable-line
 
   useEffect(() => {
+    if (!open || inline) return
     const h = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+      const t = e.target as Node
+      if (wrapRef.current?.contains(t)) return
+      if (panelRef.current?.contains(t)) return
+      setOpen(false)
+      onClose?.()
     }
     document.addEventListener("mousedown", h)
     return () => document.removeEventListener("mousedown", h)
-  }, [])
+  }, [open, inline, onClose])
 
   // Lazy-fetch the account's created_time so "Maximum" spans from creation to today.
   // Fetch even when the picker is closed if Maximum is already the active preset,
@@ -286,6 +339,15 @@ export function AdsDateRangePicker({
   const selectPreset = (p: string) => {
     setMode("preset")
     setPending(p)
+    if (p === "" && allowAllTime) {
+      setRangeStart(null)
+      setRangeEnd(null)
+      if (autoApply) {
+        onChange("")
+        closePicker()
+      }
+      return
+    }
     const { start, end } = getPresetRange(p, maxStart ?? undefined)
     setRangeStart(start)
     setRangeEnd(end)
@@ -324,11 +386,12 @@ export function AdsDateRangePicker({
   }
 
   const apply = () => {
-    if (mode === "preset" && pending) {
+    if (mode === "preset") {
       // Meta's API doesn't reliably support date_preset=maximum; send the resolved
       // account-created-time range while keeping the UI preset label as Maximum.
-      if (pending === "maximum" && rangeStart) onChange("maximum", rangeStart, rangeEnd ?? rangeStart)
-      else onChange(pending)
+      if (pending === "" && allowAllTime) onChange("")
+      else if (pending === "maximum" && rangeStart) onChange("maximum", rangeStart, rangeEnd ?? rangeStart)
+      else if (pending) onChange(pending)
     } else if (rangeStart) {
       onChange("custom", rangeStart, rangeEnd ?? rangeStart)
     }
@@ -354,23 +417,188 @@ export function AdsDateRangePicker({
 
   // Header label reflects applied state (props), not pending.
   const btnLabel = (() => {
+    if (allowAllTime && (preset === "" || preset === "all_time")) return allTimeLabel
     if (preset === "custom" && customStart && customEnd)
       return `${fmt(customStart)} – ${fmt(customEnd)}`
     if (preset === "maximum" && customStart && customEnd)
       return `Maximum: ${fmt(customStart)} – ${fmt(customEnd)}`
     const p = DATE_PICKER_PRESETS.find(x => x.value === preset)
-    if (!p) return "Select range"
+    if (!p) return allowAllTime ? allTimeLabel : "Select range"
     const { start, end } = getPresetRange(preset, maxStart ?? undefined)
     return `${p.label}: ${fmt(start)} – ${fmt(end)}`
   })()
 
   const isCustomValid = mode === "custom" && rangeStart
-  const canApply = (mode === "preset" && !!pending) || isCustomValid
+  const canApply = (mode === "preset" && (pending !== "" || (allowAllTime && pending === ""))) || !!isCustomValid
+
+  const presetList = allowAllTime
+    ? [{ value: "", label: allTimeLabel }, ...DATE_PICKER_PRESETS]
+    : DATE_PICKER_PRESETS
+
+  const panelBody = (
+    <div
+      ref={panelRef}
+      className={cn(
+        "bg-white dark:bg-card border rounded-xl shadow-2xl overflow-hidden w-[600px]",
+        inline ? "relative z-[60]" : "fixed z-[60]",
+      )}
+      style={!inline && panelPos ? { top: panelPos.top, left: panelPos.left } : undefined}
+    >
+      <div className="flex">
+        {/* ── Left: preset list ── */}
+        <div className="w-[150px] border-r shrink-0 flex flex-col bg-white dark:bg-card py-1.5 max-h-[420px] overflow-y-auto">
+          {presetList.map(p => (
+            <button
+              key={p.value || "all_time"}
+              type="button"
+              onClick={() => selectPreset(p.value)}
+              className={cn(
+                "w-full text-left px-4 py-[7px] text-xs transition-colors whitespace-nowrap",
+                mode === "preset" && pending === p.value
+                  ? "bg-[#e7f3ff] text-[#1877f2] font-semibold"
+                  : "text-[#1c2b33] dark:text-foreground hover:bg-muted/40"
+              )}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        {/* ── Right: month nav + two-month calendar + inputs + footer ── */}
+        <div className="flex-1 flex flex-col p-4 bg-white dark:bg-card min-w-0">
+          <div className="flex items-start justify-between relative mb-2">
+            <button
+              type="button"
+              onClick={prevMonth}
+              className="p-1 rounded hover:bg-muted/50 transition-colors"
+              aria-label="Previous month"
+            >
+              <IconChevronLeft className="size-4 text-muted-foreground" />
+            </button>
+            <button
+              type="button"
+              onClick={nextMonth}
+              disabled={disableNextMonth}
+              className={cn(
+                "p-1 rounded transition-colors",
+                disableNextMonth ? "opacity-30 cursor-not-allowed" : "hover:bg-muted/50"
+              )}
+              aria-label="Next month"
+            >
+              <IconChevronRight className="size-4 text-muted-foreground" />
+            </button>
+          </div>
+
+          <div className="flex items-start justify-center gap-6">
+            <CalGrid
+              year={leftYear} month={leftMonth}
+              startDate={rangeStart} endDate={rangeEnd} hoverDate={hoverDate}
+              onDay={handleDay} onHover={setHoverDate}
+            />
+            <CalGrid
+              year={rightYear} month={rightMonth}
+              startDate={rangeStart} endDate={rangeEnd} hoverDate={hoverDate}
+              onDay={handleDay} onHover={setHoverDate}
+            />
+          </div>
+
+          {/* From / To inputs — always visible, editing switches to custom mode */}
+          <div className="flex items-center gap-2 mt-4">
+            <button
+              type="button"
+              onClick={switchToCustom}
+              className={cn(
+                "size-2 rounded-full shrink-0",
+                mode === "custom" ? "bg-[#1877f2]" : "bg-muted-foreground/30"
+              )}
+              aria-label="Use custom range"
+            />
+            <select
+              value={mode === "custom" ? "custom" : pending}
+              onChange={e => e.target.value === "custom" ? switchToCustom() : selectPreset(e.target.value)}
+              className="h-9 px-2 text-xs border rounded-md bg-background w-[130px] shrink-0"
+            >
+              {presetList.map(p => <option key={p.value || "all_time"} value={p.value}>{p.label}</option>)}
+              <option value="custom">Custom</option>
+            </select>
+            <input
+              type="date"
+              max={fmtInput(todayMidnight())}
+              value={rangeStart ? fmtInput(rangeStart) : ""}
+              onChange={e => {
+                const v = e.target.value
+                if (!v) return
+                const d = new Date(v + "T00:00:00")
+                if (d > todayMidnight()) return
+                setMode("custom")
+                setPending("")
+                setRangeStart(d)
+                if (rangeEnd && d > rangeEnd) setRangeEnd(null)
+              }}
+              className="h-9 px-2 text-xs border rounded-md bg-background flex-1 min-w-0"
+            />
+            <span className="text-muted-foreground text-xs shrink-0">–</span>
+            <input
+              type="date"
+              max={fmtInput(todayMidnight())}
+              value={rangeEnd ? fmtInput(rangeEnd) : ""}
+              onChange={e => {
+                const v = e.target.value
+                if (!v) return
+                const d = new Date(v + "T00:00:00")
+                if (d > todayMidnight()) return
+                setMode("custom")
+                setPending("")
+                setRangeEnd(d)
+                if (rangeStart && d < rangeStart) setRangeStart(d)
+                if (autoApply && rangeStart) {
+                  const start = d < rangeStart ? d : rangeStart
+                  const end = d < rangeStart ? rangeStart : d
+                  onChange("custom", start, end)
+                  closePicker()
+                }
+              }}
+              className="h-9 px-2 text-xs border rounded-md bg-background flex-1 min-w-0"
+            />
+          </div>
+
+          <div className="flex items-center justify-between mt-4 pt-3 border-t">
+            <span className="text-[11px] text-muted-foreground">Dates are shown in Pacific Time</span>
+            {!autoApply && (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={closePicker}
+                  className="h-8 px-3 text-xs border rounded-lg hover:bg-muted/50 transition-colors font-medium text-[#1c2b33] dark:text-foreground"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={apply}
+                  disabled={!canApply}
+                  className={cn(
+                    "h-8 px-4 text-xs rounded-lg font-semibold transition-colors",
+                    canApply
+                      ? "bg-[#1877f2] text-white hover:bg-[#1464d8]"
+                      : "bg-muted text-muted-foreground cursor-not-allowed"
+                  )}
+                >
+                  Update
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 
   return (
     <div ref={wrapRef} className="relative">
       {!inline && (
         <button
+          type="button"
           onClick={() => setOpen(o => !o)}
           className="flex items-center gap-1.5 h-8 px-3 text-xs border rounded-lg hover:bg-muted/50 transition-colors whitespace-nowrap"
         >
@@ -381,156 +609,11 @@ export function AdsDateRangePicker({
       )}
 
       {(open || inline) && (
-        <>
-          {/* click-away shield */}
-          {!inline && <div className="fixed inset-0 z-[59]" onClick={closePicker} />}
-          <div className={cn(
-            "bg-white dark:bg-card border rounded-xl shadow-2xl overflow-hidden w-[600px]",
-            inline ? "relative z-[60]" : "absolute right-0 top-full mt-1 z-[60]",
-          )}>
-            <div className="flex">
-              {/* ── Left: preset list ── */}
-              <div className="w-[150px] border-r shrink-0 flex flex-col bg-white dark:bg-card py-1.5 max-h-[420px] overflow-y-auto">
-                {DATE_PICKER_PRESETS.map(p => (
-                  <button
-                    key={p.value}
-                    onClick={() => selectPreset(p.value)}
-                    className={cn(
-                      "w-full text-left px-4 py-[7px] text-xs transition-colors whitespace-nowrap",
-                      mode === "preset" && pending === p.value
-                        ? "bg-[#e7f3ff] text-[#1877f2] font-semibold"
-                        : "text-[#1c2b33] dark:text-foreground hover:bg-muted/40"
-                    )}
-                  >
-                    {p.label}
-                  </button>
-                ))}
-              </div>
-
-              {/* ── Right: month nav + two-month calendar + inputs + footer ── */}
-              <div className="flex-1 flex flex-col p-4 bg-white dark:bg-card min-w-0">
-                <div className="flex items-start justify-between relative mb-2">
-                  <button
-                    onClick={prevMonth}
-                    className="p-1 rounded hover:bg-muted/50 transition-colors"
-                    aria-label="Previous month"
-                  >
-                    <IconChevronLeft className="size-4 text-muted-foreground" />
-                  </button>
-                  <button
-                    onClick={nextMonth}
-                    disabled={disableNextMonth}
-                    className={cn(
-                      "p-1 rounded transition-colors",
-                      disableNextMonth ? "opacity-30 cursor-not-allowed" : "hover:bg-muted/50"
-                    )}
-                    aria-label="Next month"
-                  >
-                    <IconChevronRight className="size-4 text-muted-foreground" />
-                  </button>
-                </div>
-
-                <div className="flex items-start justify-center gap-6">
-                  <CalGrid
-                    year={leftYear} month={leftMonth}
-                    startDate={rangeStart} endDate={rangeEnd} hoverDate={hoverDate}
-                    onDay={handleDay} onHover={setHoverDate}
-                  />
-                  <CalGrid
-                    year={rightYear} month={rightMonth}
-                    startDate={rangeStart} endDate={rangeEnd} hoverDate={hoverDate}
-                    onDay={handleDay} onHover={setHoverDate}
-                  />
-                </div>
-
-                {/* From / To inputs — always visible, editing switches to custom mode */}
-                <div className="flex items-center gap-2 mt-4">
-                  <button
-                    onClick={switchToCustom}
-                    className={cn(
-                      "size-2 rounded-full shrink-0",
-                      mode === "custom" ? "bg-[#1877f2]" : "bg-muted-foreground/30"
-                    )}
-                    aria-label="Use custom range"
-                  />
-                  <select
-                    value={mode === "custom" ? "custom" : pending}
-                    onChange={e => e.target.value === "custom" ? switchToCustom() : selectPreset(e.target.value)}
-                    className="h-9 px-2 text-xs border rounded-md bg-background w-[130px] shrink-0"
-                  >
-                    {DATE_PICKER_PRESETS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-                    <option value="custom">Custom</option>
-                  </select>
-                  <input
-                    type="date"
-                    max={fmtInput(todayMidnight())}
-                    value={rangeStart ? fmtInput(rangeStart) : ""}
-                    onChange={e => {
-                      const v = e.target.value
-                      if (!v) return
-                      const d = new Date(v + "T00:00:00")
-                      if (d > todayMidnight()) return
-                      setMode("custom")
-                      setPending("")
-                      setRangeStart(d)
-                      if (rangeEnd && d > rangeEnd) setRangeEnd(null)
-                    }}
-                    className="h-9 px-2 text-xs border rounded-md bg-background flex-1 min-w-0"
-                  />
-                  <span className="text-muted-foreground text-xs shrink-0">–</span>
-                  <input
-                    type="date"
-                    max={fmtInput(todayMidnight())}
-                    value={rangeEnd ? fmtInput(rangeEnd) : ""}
-                    onChange={e => {
-                      const v = e.target.value
-                      if (!v) return
-                      const d = new Date(v + "T00:00:00")
-                      if (d > todayMidnight()) return
-                      setMode("custom")
-                      setPending("")
-                      setRangeEnd(d)
-                      if (rangeStart && d < rangeStart) setRangeStart(d)
-                      if (autoApply && rangeStart) {
-                        const start = d < rangeStart ? d : rangeStart
-                        const end = d < rangeStart ? rangeStart : d
-                        onChange("custom", start, end)
-                        closePicker()
-                      }
-                    }}
-                    className="h-9 px-2 text-xs border rounded-md bg-background flex-1 min-w-0"
-                  />
-                </div>
-
-                <div className="flex items-center justify-between mt-4 pt-3 border-t">
-                  <span className="text-[11px] text-muted-foreground">Dates are shown in Pacific Time</span>
-                  {!autoApply && (
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={closePicker}
-                        className="h-8 px-3 text-xs border rounded-lg hover:bg-muted/50 transition-colors font-medium text-[#1c2b33] dark:text-foreground"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        onClick={apply}
-                        disabled={!canApply}
-                        className={cn(
-                          "h-8 px-4 text-xs rounded-lg font-semibold transition-colors",
-                          canApply
-                            ? "bg-[#1877f2] text-white hover:bg-[#1464d8]"
-                            : "bg-muted text-muted-foreground cursor-not-allowed"
-                        )}
-                      >
-                        Update
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        </>
+        inline
+          ? panelBody
+          : mounted
+            ? createPortal(panelBody, document.body)
+            : null
       )}
     </div>
   )

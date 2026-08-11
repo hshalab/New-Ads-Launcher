@@ -6,7 +6,8 @@ import {
   MissingViaError,
   requireRole,
 } from "@/lib/auth"
-import { replaceAdCreative, updateNode } from "@/lib/facebook"
+import { getNodeTargeting, replaceAdCreative, updateNode } from "@/lib/facebook"
+import { mergeEditorTargeting } from "@/lib/targeting-merge"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { invalidateMetaReadCacheAfterWrite } from "@/app/api/facebook/_db-cache"
 
@@ -171,6 +172,21 @@ export async function POST(request: NextRequest) {
           continue
         }
 
+        // TD-37: Meta replaces `targeting` wholesale, but the editor draft is hydrated from a
+        // partial read. Never forward the draft as-is — re-read what Meta has and overlay only
+        // the keys the editor owns, then send nothing at all when the result is unchanged
+        // (a rename must not rewrite targeting).
+        let targetingToSend: unknown = undefined
+        if (change.level === "adset" && change.node.targeting !== undefined) {
+          const remoteTargeting = await getNodeTargeting(
+            change.node.id,
+            connection.access_token,
+            { isManual: isManual(connection) }
+          )
+          const merged = mergeEditorTargeting(remoteTargeting, change.node.targeting)
+          if (merged.changed) targetingToSend = merged.targeting
+        }
+
         await updateNode(change.node.id, connection.access_token, {
           name: change.node.name,
           status: change.node.status,
@@ -183,7 +199,7 @@ export async function POST(request: NextRequest) {
           bid_amount: moneyFromMinor(change.node.bid_amount),
           attribution_spec: change.node.attribution_spec,
           promoted_object: change.node.promoted_object,
-          targeting: change.node.targeting,
+          targeting: targetingToSend,
           advertiser: change.node.advertiser,
           payer: change.node.payer,
         }, { isManual: isManual(connection) })

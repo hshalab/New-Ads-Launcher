@@ -5,7 +5,9 @@ import { useSearchParams } from "next/navigation"
 import { useAdAccount } from "@/lib/ad-account-context"
 import { cn } from "@/lib/utils"
 import { CreativeCardMedia } from "@/components/creative-card-media"
+import { AdsDateRangePicker, getPresetRange } from "@/components/ads-manager/AdsDateRangePicker"
 import { Button } from "@/components/ui/button"
+import { LoadMoreButton } from "@/components/ui/load-more-button"
 import { DismissibleBanner } from "@/components/ui/dismissible-banner"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -17,7 +19,7 @@ import {
   IconChevronDown, IconPlus, IconCheck, IconDotsVertical,
   IconX, IconTrash, IconArrowLeft,
   IconClipboardList, IconUser, IconAlertCircle,
-  IconCloudDownload, IconArrowBackUp, IconCalendar,
+  IconCloudDownload, IconArrowBackUp,
 } from "@tabler/icons-react"
 import {
   MediaDetailSheet,
@@ -103,9 +105,7 @@ type PortalSort = { key: PortalSortKey; dir: "asc" | "desc" } | null
 type AssetSortKey = "name" | "brand" | "product" | "language" | "dimensions" | "type" | "status" | "date"
 type AssetSort = { key: AssetSortKey; dir: "asc" | "desc" } | null
 
-type DateRangeFilter = "" | "today" | "7d" | "30d" | "90d"
-const DATE_RANGE_DAYS: Record<Exclude<DateRangeFilter, "">, number> = { today: 1, "7d": 7, "30d": 30, "90d": 90 }
-const DATE_RANGE_LABEL: Record<DateRangeFilter, string> = { "": "All time", today: "Today", "7d": "Last 7 days", "30d": "Last 30 days", "90d": "Last 90 days" }
+// Shared picker presets + "All time" (empty string).
 
 type Section = "all" | "boards" | "requests" | "my-uploads" | "portal" | `board_${string}`
 
@@ -202,7 +202,9 @@ export default function AssetsPage() {
   const [portalAnchorId, setPortalAnchorId] = useState<string | null>(null)
   const [portalSort, setPortalSort] = useState<PortalSort>(null)
   const [assetSort, setAssetSort] = useState<AssetSort>({ key: "date", dir: "desc" })
-  const [dateRange, setDateRange] = useState<DateRangeFilter>("")
+  const [dateRange, setDateRange] = useState("")
+  const [dateCustomStart, setDateCustomStart] = useState<Date | undefined>()
+  const [dateCustomEnd, setDateCustomEnd] = useState<Date | undefined>()
   const [portalAccountId, setPortalAccountId] = useState("")
   /**
    * The provider's accounts reshaped for AdAccountPill's `showAccountId`, which reads
@@ -713,17 +715,20 @@ export default function AssetsPage() {
       if (filterLanguage && pm?.language !== filterLanguage) return false
 
       if (dateRange) {
-        const days = DATE_RANGE_DAYS[dateRange]
-        const dateLimit = new Date()
-        dateLimit.setDate(dateLimit.getDate() - days)
         const itemDateStr = c.assigned_at || c.created_at
         if (!itemDateStr) return false
-        if (new Date(itemDateStr) < dateLimit) return false
+        const itemDate = new Date(itemDateStr)
+        const { start, end } = (dateRange === "custom" || dateRange === "maximum") && dateCustomStart && dateCustomEnd
+          ? { start: dateCustomStart, end: dateCustomEnd }
+          : getPresetRange(dateRange)
+        const startDay = new Date(start); startDay.setHours(0, 0, 0, 0)
+        const endDay = new Date(end); endDay.setHours(23, 59, 59, 999)
+        if (itemDate < startDay || itemDate > endDay) return false
       }
 
       return true
     })
-  }, [search, filterType, filterStatus, resolvePortalMetadata, filterBrand, filterProduct, filterLanguage, dateRange])
+  }, [search, filterType, filterStatus, resolvePortalMetadata, filterBrand, filterProduct, filterLanguage, dateRange, dateCustomStart, dateCustomEnd])
 
   const displayList = useMemo(() => {
     const filtered = section === "my-uploads"
@@ -1665,11 +1670,13 @@ export default function AssetsPage() {
                       </div>
 
                       {portalVisible < portalFiles.length && (
-                        <div className="flex justify-center pt-1">
-                          <Button size="sm" variant="outline" onClick={() => setPortalVisible(v => v + PORTAL_PAGE_SIZE)}>
-                            Show more ({portalFiles.length - portalVisible} media)
-                          </Button>
-                        </div>
+                        <LoadMoreButton
+                          remaining={portalFiles.length - portalVisible}
+                          onClick={() => setPortalVisible(v => v + PORTAL_PAGE_SIZE)}
+                          className="pt-1"
+                        >
+                          {`Show more (${portalFiles.length - portalVisible} media)`}
+                        </LoadMoreButton>
                       )}
                     </>
                   )}
@@ -1911,30 +1918,27 @@ export default function AssetsPage() {
                   </div>
                 )}
 
-                {/* Time Filter */}
-                <div className="relative group">
-                  <button className={cn(
-                    "flex items-center gap-1 h-8 px-3 text-xs rounded-lg border shadow-sm transition-colors",
-                    dateRange ? "border-primary bg-primary/10 text-link font-semibold shadow" : "border-border bg-background text-foreground/80 hover:text-foreground hover:bg-muted/60"
-                  )}>
-                    <IconCalendar className="size-3" />
-                    <span>{DATE_RANGE_LABEL[dateRange]}</span> <IconChevronDown className="size-3" />
-                  </button>
-                  <div className="absolute top-full left-0 mt-1 z-20 bg-popover border rounded-lg shadow-md p-1 min-w-[120px] hidden group-hover:block group-focus-within:block">
-                    {(["", "today", "7d", "30d", "90d"] as const).map(v => (
-                      <button key={v} onClick={() => setDateRange(v)}
-                        className={cn("w-full text-left px-2 py-1.5 text-xs rounded hover:bg-muted flex items-center gap-2",
-                          dateRange === v && "text-link"
-                        )}>
-                        {dateRange === v && <IconCheck className="size-3" />}
-                        {DATE_RANGE_LABEL[v]}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                {/* Time Filter — shared AdsDateRangePicker */}
+                <AdsDateRangePicker
+                  preset={dateRange}
+                  customStart={dateCustomStart}
+                  customEnd={dateCustomEnd}
+                  allowAllTime
+                  autoApply
+                  onChange={(preset, start, end) => {
+                    setDateRange(preset)
+                    if (preset === "custom" || preset === "maximum") {
+                      setDateCustomStart(start)
+                      setDateCustomEnd(end)
+                    } else {
+                      setDateCustomStart(undefined)
+                      setDateCustomEnd(undefined)
+                    }
+                  }}
+                />
 
                 {(filterType || filterStatus || filterBrand || filterProduct || filterLanguage || dateRange) && (
-                  <button onClick={() => { setFilterType(""); setFilterStatus(""); setFilterBrand(""); setFilterProduct(""); setFilterLanguage(""); setDateRange("") }}
+                  <button onClick={() => { setFilterType(""); setFilterStatus(""); setFilterBrand(""); setFilterProduct(""); setFilterLanguage(""); setDateRange(""); setDateCustomStart(undefined); setDateCustomEnd(undefined) }}
                     className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 border rounded-lg">
                     <IconX className="size-3" /> Clear
                   </button>
@@ -2156,19 +2160,12 @@ export default function AssetsPage() {
 
               {/* Load More — only show for "all" and "my-uploads" sections, not boards */}
               {!currentBoardId && creativesHasMore && (
-                <div className="flex justify-center pt-2 pb-1">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => loadCreatives(creativesNextCursor, false)}
-                    disabled={loadingMoreCreatives}
-                    className="gap-2 min-w-[140px]"
-                  >
-                    {loadingMoreCreatives
-                      ? <><IconLoader2 className="size-3.5 animate-spin" /> Loading…</>
-                      : `Load More (${creatives.length} loaded)`}
-                  </Button>
-                </div>
+                <LoadMoreButton
+                  loading={loadingMoreCreatives}
+                  loaded={creatives.length}
+                  onClick={() => loadCreatives(creativesNextCursor, false)}
+                  className="pt-2 pb-1"
+                />
               )}
             </div>
           </>
