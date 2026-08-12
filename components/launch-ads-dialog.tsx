@@ -135,6 +135,7 @@ export function LaunchAdsDialog({ open, onClose, selectedCreativeIds, adAccountI
   // Pages
   const [pages, setPages] = useState<FacebookPage[]>([])
   const [selectedPageId, setSelectedPageId] = useState("")
+  const [pagesLoading, setPagesLoading] = useState(false)
 
   // Creative Enhancements
   const [useMetaDefaults, setUseMetaDefaults] = useState(false)
@@ -207,27 +208,37 @@ export function LaunchAdsDialog({ open, onClose, selectedCreativeIds, adAccountI
         }
       })
 
-    // Check shared sessionStorage cache before fetching pages
+    // Pages are required for launch — gate the dialog body until they land.
+    let pagesCancelled = false
+    setPagesLoading(true)
     ;(async () => {
       try {
         const cached = sessionStorage.getItem("fb_pages_cache")
         if (cached) {
           const { ts, pages: p } = JSON.parse(cached)
           if (Date.now() - ts < 10 * 60 * 1000 && Array.isArray(p)) {
-            setPages(p)
-            if (p.length > 0) setSelectedPageId(p[0].id)
+            if (!pagesCancelled) {
+              setPages(p)
+              if (p.length > 0) setSelectedPageId(p[0].id)
+              setPagesLoading(false)
+            }
             return
           }
         }
       } catch {}
-      fetch("/api/facebook/pages")
-        .then((r) => r.json())
-        .then((d) => {
-          const pl = d.pages || []
-          setPages(pl)
-          if (pl.length > 0) setSelectedPageId(pl[0].id)
-          try { sessionStorage.setItem("fb_pages_cache", JSON.stringify({ ts: Date.now(), pages: pl })) } catch {}
-        })
+      try {
+        const res = await fetch("/api/facebook/pages")
+        const d = await res.json().catch(() => ({}))
+        if (pagesCancelled) return
+        const pl = d.pages || []
+        setPages(pl)
+        if (pl.length > 0) setSelectedPageId(pl[0].id)
+        try { sessionStorage.setItem("fb_pages_cache", JSON.stringify({ ts: Date.now(), pages: pl })) } catch {}
+      } catch {
+        if (!pagesCancelled) setPages([])
+      } finally {
+        if (!pagesCancelled) setPagesLoading(false)
+      }
     })()
 
     setLoadingPixels(true)
@@ -261,6 +272,8 @@ export function LaunchAdsDialog({ open, onClose, selectedCreativeIds, adAccountI
         }
       })
       .finally(() => setLoadingPresets(false))
+
+    return () => { pagesCancelled = true }
   }, [open, adAccountId])
 
   useEffect(() => {
@@ -723,7 +736,15 @@ export function LaunchAdsDialog({ open, onClose, selectedCreativeIds, adAccountI
           </DialogTitle>
         </DialogHeader>
 
-        {result ? (
+        {pagesLoading && !result ? (
+          <div className="flex min-h-[60vh] items-center justify-center">
+            <div className="flex flex-col items-center gap-3 text-sm text-muted-foreground">
+              <IconLoader2 className="size-6 animate-spin text-primary" />
+              <div className="font-medium text-foreground">Loading launcher…</div>
+              <div>Loading Facebook pages…</div>
+            </div>
+          </div>
+        ) : result ? (
           <div className="space-y-4">
             {/* Summary banner */}
             <div className={`rounded-lg border p-4 ${result.errors?.length === 0 ? "border-green-200 bg-green-50" : "border-amber-200 bg-amber-50"}`}>
@@ -739,6 +760,11 @@ export function LaunchAdsDialog({ open, onClose, selectedCreativeIds, adAccountI
                 </a>
               )}
             </div>
+            {result.auditError && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                {result.auditError} Do not retry blindly; inspect Meta Ads Manager first to avoid duplicate ads.
+              </div>
+            )}
 
             {/* Created ads table */}
             {result.created?.length > 0 && (

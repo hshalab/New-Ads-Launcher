@@ -520,6 +520,7 @@ export async function POST(request: NextRequest) {
     }
 
     let batchId: string | undefined
+    let auditError: string | null = null
     async function saveLaunchBatch() {
       const status = allErrors.length === 0 ? "success" : allResults.length > 0 ? "partial" : "failed"
       const creativeThumbs = launchCreatives
@@ -570,8 +571,10 @@ export async function POST(request: NextRequest) {
       }).select("id").single()
       if (error) {
         console.error("[launch] Failed to save launch batch:", error)
+        auditError = `Ads were created in Meta, but Launch History could not be saved: ${error.message}`
       } else {
         batchId = data?.id
+        auditError = null
       }
 
       // This route wrote a batch row but never told anybody — the two other launch
@@ -627,6 +630,7 @@ export async function POST(request: NextRequest) {
         summary: `${allResults.length} ads created, ${allErrors.length} failed`,
         adManagerUrl: `/ads-manager?batch=${batchId || ""}`,
         batchId,
+        auditError,
       })
     }
 
@@ -718,6 +722,7 @@ export async function POST(request: NextRequest) {
       summary: `${allResults.length} ads created, ${allErrors.length} failed`,
       adManagerUrl: `/ads-manager?batch=${batchId || ""}`,
       batchId,
+      auditError,
     })
   } catch (err: any) {
     console.error("Launch error:", err)

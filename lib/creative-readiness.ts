@@ -32,7 +32,10 @@ export type LaunchableCreative = {
 }
 
 /** A creative is launchable iff Meta has the asset — status alone is not proof. */
-export function isLaunchable(c: LaunchableCreative): boolean {
+export function isLaunchable(c: {
+  fb_image_hash?: string | null
+  fb_video_id?: string | null
+}): boolean {
   return Boolean(c.fb_image_hash || c.fb_video_id)
 }
 

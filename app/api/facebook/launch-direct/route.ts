@@ -580,21 +580,11 @@ export async function POST(request: NextRequest) {
       console.error("[launch-direct] Failed to save launch batch:", batchErr)
     }
     const batchId: string | null = batchRecord?.id || null
+    const auditError = batchErr
+      ? `Ads were created in Meta, but Launch History could not be saved: ${batchErr.message}`
+      : null
 
-    // Notify teammates about the launch. Both outcomes are reported: a launch that
-    // half-failed used to be indistinguishable from one that fully succeeded.
-    // dedupeKey is the batch id, so a retried request delivers once.
-    void notifyLaunchOutcome({
-      orgId: ctx.orgId,
-      actorId: ctx.user.id,
-      actorName: userName,
-      batchId,
-      adAccountName: adAccountName || adAccountId,
-      targetName: finalAdSetNames[0] || null,
-      created: created.length,
-      failed: errors.length,
-      source: "launch-direct",
-    })
+    let scheduleError: string | null = null
 
     // Save scheduled activation record so cron job can activate at the right time
     if (scheduledStart && created.length > 0) {
@@ -603,7 +593,7 @@ export async function POST(request: NextRequest) {
         .filter(Boolean) as string[]
       if (adIds.length > 0) {
         const adminDb = createAdminClient()
-        await adminDb.from("scheduled_activations").insert({
+        const { error: activationError } = await adminDb.from("scheduled_activations").insert({
           org_id: ctx.orgId,
           ad_account_id: adAccountId,
           ad_ids: adIds,
@@ -611,8 +601,30 @@ export async function POST(request: NextRequest) {
           end_time: scheduledEnd || null,
           status: "pending",
         })
+        if (activationError) {
+          scheduleError = `Ads were created PAUSED, but scheduling failed: ${activationError.message}`
+          console.error("[launch-direct] Failed to save scheduled activation:", activationError)
+          if (batchId) {
+            await adminDb.from("launch_batches").update({
+              status: "partial",
+              errors: [...errors, { type: "schedule", error: scheduleError }],
+            }).eq("id", batchId)
+          }
+        }
       }
     }
+
+    void notifyLaunchOutcome({
+      orgId: ctx.orgId,
+      actorId: ctx.user.id,
+      actorName: userName,
+      batchId,
+      adAccountName: adAccountName || adAccountId,
+      targetName: finalAdSetNames[0] || null,
+      created: created.length,
+      failed: errors.length + Number(Boolean(scheduleError)),
+      source: "launch-direct",
+    })
 
     if (created.length > 0) {
       await invalidateMetaReadCacheAfterWrite({
@@ -625,11 +637,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       batchId,
+      auditError,
       created,
       errors,
       totalAds: created.length,
       durationMs,
-      scheduled: scheduledStart ? { at: scheduledStart, end: scheduledEnd || null } : null,
+      scheduled: scheduledStart && !scheduleError ? { at: scheduledStart, end: scheduledEnd || null } : null,
+      scheduleError,
       summary: scheduledStart
         ? `${created.length} ads scheduled for ${new Date(scheduledStart).toLocaleString()}${errors.length ? `, ${errors.length} failed` : ""}`
         : `${created.length} ads created${errors.length ? `, ${errors.length} failed` : ""}`,

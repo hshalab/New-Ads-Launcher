@@ -89,7 +89,7 @@ export async function GET(request: NextRequest) {
       at: batch.created_at,
       label: "Launch submitted",
       class: "produce" as const,
-      detail: `${batch.ad_account_name || "Unknown ad account"} · ${Math.max(0, (batch.total_ads || 0) - (batch.failed_ads || 0))} ads · ${batch.status}`,
+      detail: `${batch.ad_account_name || "Unknown ad account"} · ${Math.max(0, batch.total_ads || 0)} ads · ${batch.status}`,
     }] : []),
     ...activityRows.flatMap(row => {
       const pair = `${row.object_type}:${row.action}`

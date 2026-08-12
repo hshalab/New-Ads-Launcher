@@ -155,7 +155,7 @@ type TrackingData = {
 const METRIC_METHODOLOGY = {
   successRate: "% batches with status = success out of all batches in the period.",
   e2eRate: "Y / X where X = all Meta Ads Manager ads across connected org ad accounts, Y = ads whose name contains [app].",
-  adsCreated: "Sum of (total_ads − failed_ads) across batches in the period.",
+  adsCreated: "Sum of total_ads across batches in the period. Launch routes store only successfully created ads in total_ads; failed_ads is reported separately.",
   needsReview: "Batches whose status is not success (partial or failed).",
   avgDuration: "Mean server-side batch duration_ms in the period.",
 }
@@ -1352,7 +1352,7 @@ export default function TrackingPage() {
                         <tr key={batch.id} className="border-b last:border-0">
                           <td className="px-3 py-2 text-muted-foreground">{batch.created_at ? new Date(batch.created_at).toLocaleDateString() : "-"}</td>
                           <td className="px-3 py-2">{batch.ad_account_name || "Unknown"}</td>
-                          <td className="px-3 py-2 text-right tabular-nums">{Math.max(0, (batch.total_ads || 0) - (batch.failed_ads || 0))}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{Math.max(0, batch.total_ads || 0)}</td>
                           <td className="px-3 py-2 text-right"><span className={batch.status === "success" ? "text-emerald-600" : "text-amber-600"}>{batch.status}</span></td>
                         </tr>
                       ))}

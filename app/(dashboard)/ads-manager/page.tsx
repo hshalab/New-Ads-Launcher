@@ -60,9 +60,11 @@ import {
   type FilterLevel,
   SELECTED_ROWS_FIELD,
   isChipValidAt,
+  loadAdsManagerFilterState,
   matchesChip,
   newChipId,
   orderChipsForEval,
+  saveAdsManagerFilterState,
 } from "@/lib/ads-manager-filters"
 import {
   type BulkDraftField,
@@ -1108,6 +1110,7 @@ function AdsManagerContent() {
   /** `sortField === null` is the third sort state: the table's default newest-first order. */
   const [sortField, setSortField] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<SortDir>("asc")
+  const [filtersHydratedAccount, setFiltersHydratedAccount] = useState("")
 
   // Selection — kept per tab so switching tabs or drilling down/back doesn't drop it.
   const [selectedCampaignIds, setSelectedCampaignIds] = useState<Set<string>>(new Set())
@@ -1231,6 +1234,46 @@ function AdsManagerContent() {
   const [breakdowns,        setBreakdowns]        = useState<string[]>([])
   const [breakdownRows,     setBreakdownRows]     = useState<BreakdownRow[]>([])
   const [breakdownError,    setBreakdownError]    = useState("")
+
+  useEffect(() => {
+    if (!selectedAccountId) {
+      setFiltersHydratedAccount("")
+      return
+    }
+    const stored = loadAdsManagerFilterState(selectedAccountId)
+    setTab(stored?.tab ?? "campaigns")
+    setSearch(stored?.search ?? "")
+    setStatusFilter(stored?.statusFilter ?? "ACTIVE")
+    setChips(stored?.chips ?? [])
+    setCampaignFilter(new Set(stored?.campaignFilter ?? []))
+    setAdSetFilter(new Set(stored?.adSetFilter ?? []))
+    setDatePreset(stored?.datePreset ?? "last_7d")
+    setCustomDateRange(stored?.customDateRange ? { start: new Date(stored.customDateRange.start), end: new Date(stored.customDateRange.end) } : null)
+    setSortField(stored?.sortField ?? null)
+    setSortDir(stored?.sortDir ?? "asc")
+    setBreakdowns(stored?.breakdowns ?? [])
+    setPage(1)
+    setPageCursors({ campaigns: [undefined], adsets: [undefined], ads: [undefined] })
+    setFiltersHydratedAccount(selectedAccountId)
+  }, [selectedAccountId])
+
+  useEffect(() => {
+    if (!selectedAccountId || filtersHydratedAccount !== selectedAccountId) return
+    saveAdsManagerFilterState(selectedAccountId, {
+      tab,
+      search,
+      statusFilter,
+      chips,
+      campaignFilter: Array.from(campaignFilter),
+      adSetFilter: Array.from(adSetFilter),
+      datePreset,
+      customDateRange: customDateRange ? { start: customDateRange.start.toISOString(), end: customDateRange.end.toISOString() } : null,
+      sortField,
+      sortDir,
+      breakdowns,
+    })
+  }, [selectedAccountId, filtersHydratedAccount, tab, search, statusFilter, chips, campaignFilter, adSetFilter, datePreset, customDateRange, sortField, sortDir, breakdowns])
+
   const [performancePopup, setPerformancePopup] = useState<{
     mode: "charts" | "compare"
     rows: ReportRow[]

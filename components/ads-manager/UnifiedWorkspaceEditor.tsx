@@ -6,6 +6,7 @@ import {
   IconChevronRight,
   IconDots,
   IconLayoutSidebarLeftCollapse,
+  IconLoader2,
   IconPhoto,
   IconPlayerPlay,
   IconSearch,
@@ -594,6 +595,20 @@ export function UnifiedWorkspaceEditor({
         <div className="max-w-sm text-center">
           <p className="font-semibold">Select a campaign, ad set or ad</p>
           <p className="mt-1 text-sm text-muted-foreground">The editor will stay in this workspace while you move through the hierarchy.</p>
+        </div>
+      </div>
+    )
+  }
+
+  // Ad-level identity (Page) is required for process — gate until pages land
+  // unless the draft already carries a page_id (edit existing ad).
+  if (level === "ad" && !readOnly && pagesLoading && !draft.page_id) {
+    return (
+      <div className="flex h-full items-center justify-center p-8">
+        <div className="flex flex-col items-center gap-3 text-sm text-muted-foreground">
+          <IconLoader2 className="size-6 animate-spin text-primary" />
+          <div className="font-medium text-foreground">Loading editor…</div>
+          <div>Loading Facebook pages…</div>
         </div>
       </div>
     )

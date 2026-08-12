@@ -68,6 +68,7 @@ import { LoadMediaModal } from "@/components/shared/load-media-modal"
 import { LoadCopyModal } from "@/components/shared/load-copy-modal"
 import { formatNumberShort, formatCurrency } from "@/lib/format"
 import { useLaunchBatchesRealtime } from "@/hooks/use-launch-batches-realtime"
+import { isLaunchable } from "@/lib/creative-readiness"
 
 const Tip = ({ text, children, className }: { text: string; children: ReactNode; className?: string }) => (
   <Tooltip>
@@ -90,7 +91,7 @@ interface SitelinkItem { title: string; url: string }
 interface TableRow { id: string; creative: Creative | null; adName: string; primaryText: string; headline: string; description: string; adSetIds: string[]; primaryTextVariations?: string[]; headlineVariations?: string[]; descriptionVariations?: string[]; cta?: string; webLink?: string; urlTags?: string; promoCode?: string; launchAsActive?: boolean; pageId?: string; igId?: string; sitelinks?: SitelinkItem[]; partnership?: PartnershipState; multilanguage?: MultilanguageState; catalog?: CatalogAdsState; schedule?: { start: string; end?: string } }
 interface CreatedAd { adId: string; adSetId: string; adSetName: string; creativeId?: string; fileName?: string; thumbnailUrl?: string | null; mediaType?: "image" | "video"; mode?: string; multiGroup?: string; flexibleAd?: string; carousel?: string }
 interface LaunchMeta { cta: string; webLink: string; headline: string; primaryText: string; pageId: string; pageName?: string; adAccountId: string; adAccountName: string; timestamp: string }
-interface LaunchResult { created: number; failed: number; durationMs: number; errors: { adSetId: string; fileName: string; error: string }[]; scheduled?: { at: string; end: string | null } | null; createdAds: CreatedAd[]; batchId?: string | null; launchMeta?: LaunchMeta }
+interface LaunchResult { created: number; failed: number; durationMs: number; errors: { adSetId: string; fileName: string; error: string }[]; scheduled?: { at: string; end: string | null } | null; scheduleError?: string | null; auditError?: string | null; createdAds: CreatedAd[]; batchId?: string | null; launchMeta?: LaunchMeta }
 interface UploadItem {
   id: string
   file: File
@@ -251,6 +252,16 @@ interface LaunchBatch {
   errors: any[]
   created_ads?: CreatedAd[]
   deleted_at?: string | null
+}
+interface ScheduledActivation {
+  id: string
+  ad_account_id: string
+  ad_ids: string[]
+  scheduled_at: string
+  end_time?: string | null
+  status: "pending" | "activated" | "paused" | "cancelled" | "failed"
+  error?: string | null
+  created_at: string
 }
 
 // Facebook ads-supported languages (Meta locale codes)
@@ -9189,8 +9200,8 @@ function LaunchResultModal({ result, onClose }: { result: LaunchResult; onClose:
   const [fetchMs, setFetchMs] = useState<number | null>(null)
   const [batchCopied, setBatchCopied] = useState(false)
 
-  const isSuccess = result.failed === 0
-  const isPartial = result.created > 0 && result.failed > 0
+  const isSuccess = result.failed === 0 && !result.scheduleError && !result.auditError
+  const isPartial = result.created > 0 && (result.failed > 0 || Boolean(result.scheduleError) || Boolean(result.auditError))
   const batchShort = result.batchId
     ? result.batchId.replace(/-/g, "").slice(-6).toUpperCase()
     : Math.floor(Math.random() * 900000 + 100000).toString()
@@ -9350,6 +9361,18 @@ function LaunchResultModal({ result, onClose }: { result: LaunchResult; onClose:
                   <IconClock className="size-3.5 shrink-0" />
                   Activates: {new Date(result.scheduled.at).toLocaleString()}
                   {result.scheduled.end && ` · Ends: ${new Date(result.scheduled.end).toLocaleString()}`}
+                </div>
+              )}
+              {result.scheduleError && (
+                <div className="mt-3 text-xs text-amber-700 bg-amber-50 dark:bg-amber-900/20 dark:text-amber-300 rounded px-3 py-2 flex items-start gap-2">
+                  <IconAlertTriangle className="size-3.5 shrink-0 mt-0.5" />
+                  <span>{result.scheduleError} Review these PAUSED ads in Meta Ads Manager; they will not activate automatically.</span>
+                </div>
+              )}
+              {result.auditError && (
+                <div className="mt-3 text-xs text-amber-700 bg-amber-50 dark:bg-amber-900/20 dark:text-amber-300 rounded px-3 py-2 flex items-start gap-2">
+                  <IconAlertTriangle className="size-3.5 shrink-0 mt-0.5" />
+                  <span>{result.auditError} Do not retry blindly; inspect Meta Ads Manager first to avoid duplicate ads.</span>
                 </div>
               )}
             </div>
@@ -9760,6 +9783,7 @@ function LaunchHistorySection({ reloadTrigger, onRelaunch, onLoadDraft, tabOverr
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [actionLoading, setActionLoading] = useState(false)
   const [batches, setBatches] = useState<LaunchBatch[]>([])
+  const [scheduledActivations, setScheduledActivations] = useState<ScheduledActivation[]>([])
   const [drafts, setDrafts] = useState<DraftRecord[]>([])
   const [loading, setLoading] = useState(false)
   const [draftsLoading, setDraftsLoading] = useState(false)
@@ -9772,16 +9796,23 @@ function LaunchHistorySection({ reloadTrigger, onRelaunch, onLoadDraft, tabOverr
   const [displayCount, setDisplayCount] = useState(10)
 
   useEffect(() => { if (tabOverride) setTab(tabOverride) }, [tabOverride])
-  useEffect(() => { setSelectedIds(new Set()) }, [tab])
+  useEffect(() => {
+    setSelectedIds(new Set())
+    setStatusFilter("all")
+  }, [tab])
 
   const load = useCallback(() => {
     setLoading(true)
     const params = new URLSearchParams()
     if (statusFilter !== "all") params.set("status", statusFilter)
     if (tab === "deleted") params.set("trash", "1")
+    if (tab === "scheduled") params.set("scheduled", "1")
     fetch(`/api/launch-history?${params}`)
       .then(r => r.json())
-      .then(d => setBatches(d.batches || []))
+      .then(d => {
+        if (tab === "scheduled") setScheduledActivations(d.activations || [])
+        else setBatches(d.batches || [])
+      })
       .catch(() => {})
       .finally(() => setLoading(false))
   }, [statusFilter, tab])
@@ -9799,8 +9830,9 @@ function LaunchHistorySection({ reloadTrigger, onRelaunch, onLoadDraft, tabOverr
 
   const deleteDraft = async (id: string) => {
     setDeletingDraftId(id)
-    await fetch(`/api/launch-drafts?id=${id}`, { method: "DELETE" })
-    setDrafts(s => s.filter(d => d.id !== id))
+    const res = await fetch(`/api/launch-drafts?id=${id}`, { method: "DELETE" })
+    if (res.ok) setDrafts(s => s.filter(d => d.id !== id))
+    else alert((await res.json().catch(() => ({}))).error || "Failed to delete draft")
     setDeletingDraftId(null)
   }
 
@@ -9849,8 +9881,15 @@ function LaunchHistorySection({ reloadTrigger, onRelaunch, onLoadDraft, tabOverr
     return (
       b.adset_names?.some(n => n.toLowerCase().includes(q)) ||
       b.ad_account_name?.toLowerCase().includes(q) ||
-      b.user_name?.toLowerCase().includes(q)
+      b.user_name?.toLowerCase().includes(q) ||
+      b.id.toLowerCase().includes(q) ||
+      b.created_ads?.some(ad => ad.fileName?.toLowerCase().includes(q))
     )
+  })
+  const filteredScheduled = scheduledActivations.filter(item => {
+    if (!search) return true
+    const q = search.toLowerCase()
+    return item.ad_account_id.toLowerCase().includes(q) || item.ad_ids.some(id => id.toLowerCase().includes(q))
   })
 
   // Labels name the record's state, not the surface — "Launched" is a thing that happened to
@@ -9929,15 +9968,23 @@ function LaunchHistorySection({ reloadTrigger, onRelaunch, onLoadDraft, tabOverr
           <div className="relative">
             <IconSearch className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3 text-muted-foreground/50" />
             <input value={search} onChange={e => setSearch(e.target.value)}
-              placeholder="Search by ad set, ad name or batch..."
+              placeholder="Search by ad set, ad name, account, user or batch..."
               className="pl-7 pr-3 py-1.5 text-xs bg-muted/40 border rounded-lg outline-none focus:ring-1 focus:ring-ring w-52 placeholder:text-muted-foreground/50" />
           </div>
           <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
             className="h-7 px-2 text-xs border rounded-lg bg-background outline-none">
             <option value="all">All Status</option>
-            <option value="success">Success</option>
-            <option value="partial">Partial</option>
-            <option value="failed">Failed</option>
+            {tab === "scheduled" ? <>
+              <option value="pending">Pending</option>
+              <option value="activated">Activated</option>
+              <option value="paused">Paused</option>
+              <option value="failed">Failed</option>
+              <option value="cancelled">Cancelled</option>
+            </> : <>
+              <option value="success">Success</option>
+              <option value="partial">Partial</option>
+              <option value="failed">Failed</option>
+            </>}
           </select>
           <Button variant="ghost" size="icon" className="size-7" onClick={load}>
             <IconRefresh className={cn("size-3.5 text-muted-foreground", loading && "animate-spin")} />
@@ -10027,6 +10074,29 @@ function LaunchHistorySection({ reloadTrigger, onRelaunch, onLoadDraft, tabOverr
 
       {/* Launches + Scheduled tab content */}
       {tab !== "drafts" && <>
+      {tab === "scheduled" ? (
+        <>
+          <div className="grid grid-cols-[minmax(180px,1fr)_90px_160px_160px_100px_minmax(180px,1fr)] gap-3 text-xs font-semibold text-muted-foreground/55 uppercase tracking-wide border-b px-4 py-1.5">
+            <span>Account</span><span>Ads</span><span>Activates</span><span>Ends</span><span>Status</span><span>Error</span>
+          </div>
+          <div data-table="comfortable">
+            {loading ? (
+              <div className="flex items-center justify-center py-10"><IconLoader2 className="size-4 animate-spin text-muted-foreground" /></div>
+            ) : filteredScheduled.length === 0 ? (
+              <div className="flex items-center justify-center py-10 text-xs text-muted-foreground/50">No scheduled ads</div>
+            ) : filteredScheduled.map(item => (
+              <div key={item.id} data-table-row className="grid grid-cols-[minmax(180px,1fr)_90px_160px_160px_100px_minmax(180px,1fr)] gap-3 items-center border-b px-4 py-2 text-xs">
+                <span className="truncate font-medium">{item.ad_account_id}</span>
+                <span>{item.ad_ids.length}</span>
+                <span className="text-muted-foreground">{formatDate(item.scheduled_at)}</span>
+                <span className="text-muted-foreground">{item.end_time ? formatDate(item.end_time) : "—"}</span>
+                <span className={cn("w-fit rounded-full px-1.5 py-0.5 font-semibold", item.status === "failed" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" : item.status === "pending" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" : "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400")}>{item.status}</span>
+                <span className="truncate text-muted-foreground" title={item.error || ""}>{item.error || "—"}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : <>
       {/* Table header */}
       <div className="grid text-xs font-semibold text-muted-foreground/55 uppercase tracking-wide border-b px-4 py-1.5 shrink-0"
         style={historyGrid(selectedIds.size > 0)}>
@@ -10051,11 +10121,7 @@ function LaunchHistorySection({ reloadTrigger, onRelaunch, onLoadDraft, tabOverr
       </div>
 
       <div data-table="comfortable">
-        {tab !== "launches" && tab !== "deleted" ? (
-          <div className="flex items-center justify-center py-10 text-xs text-muted-foreground/50">
-            No scheduled ads
-          </div>
-        ) : loading ? (
+        {loading ? (
           <div className="flex items-center justify-center py-10">
             <IconLoader2 className="size-4 animate-spin text-muted-foreground" />
           </div>
@@ -10167,6 +10233,7 @@ function LaunchHistorySection({ reloadTrigger, onRelaunch, onLoadDraft, tabOverr
           )}
         </>}
       </div>
+      </>}
       </>}
     </div>
   )
@@ -11676,7 +11743,7 @@ export default function LaunchPage() {
 }
 
 function LaunchPageContent() {
-  const { selectedAccountId, selectedAccount, adAccounts, setSelectedAccountId } = useAdAccount()
+  const { selectedAccountId, selectedAccount, adAccounts, setSelectedAccountId, loading: adAccountsLoading } = useAdAccount()
   const { activeOrgId } = useOrg()
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -12857,6 +12924,7 @@ function LaunchPageContent() {
   // Fetch pages 1 lần khi mount — cache 10 min in sessionStorage to avoid rate limits
   const [pagesError, setPagesError] = useState<string>("")
   const [needsReconnect, setNeedsReconnect] = useState(false)
+  const [pagesLoading, setPagesLoading] = useState(false)
   const pagesCacheKey = activeOrgId && selectedAccountId
     ? `fb_pages_cache:${activeOrgId}:${selectedAccountId}`
     : ""
@@ -12864,6 +12932,7 @@ function LaunchPageContent() {
   const pagesRateLimitKey = activeOrgId ? `fb_pages_ratelimit:${activeOrgId}` : "fb_pages_ratelimit"
   const PAGES_RL_COOLDOWN  = 5 * 60 * 1000  // 5 minutes — don't re-hit after 429
   useEffect(() => {
+    let cancelled = false
     setPages([])
     setSelectedPageId("")
     setSelectedIgPageId("")
@@ -12871,11 +12940,17 @@ function LaunchPageContent() {
     setPagesError("")
     setNeedsReconnect(false)
 
-    if (!activeOrgId) return
-    if (!selectedAccountId) {
-      setPagesError("Select or connect an ad account to load pages.")
+    if (!activeOrgId) {
+      setPagesLoading(false)
       return
     }
+    if (!selectedAccountId) {
+      setPagesError("Select or connect an ad account to load pages.")
+      setPagesLoading(false)
+      return
+    }
+
+    setPagesLoading(true)
 
     // Respect active rate-limit cooldown (avoids hammering Facebook on rapid refreshes)
     try {
@@ -12884,7 +12959,10 @@ function LaunchPageContent() {
         const since = Date.now() - parseInt(rl, 10)
         if (since < PAGES_RL_COOLDOWN) {
           const remaining = Math.ceil((PAGES_RL_COOLDOWN - since) / 1000 / 60)
-          setPagesError(`Facebook API rate limit active. Try again in ~${remaining} min.`)
+          if (!cancelled) {
+            setPagesError(`Facebook API rate limit active. Try again in ~${remaining} min.`)
+            setPagesLoading(false)
+          }
           return
         }
         sessionStorage.removeItem(pagesRateLimitKey)
@@ -12899,7 +12977,10 @@ function LaunchPageContent() {
         if (Date.now() - ts < PAGES_CACHE_TTL && Array.isArray(cachedPages)) {
           const cleanPages = sanitizePages(cachedPages)
           console.log(`[pages] Using cache (${cleanPages.length} pages)`)
-          setPages(cleanPages)
+          if (!cancelled) {
+            setPages(cleanPages)
+            setPagesLoading(false)
+          }
           return
         }
       }
@@ -12908,6 +12989,7 @@ function LaunchPageContent() {
     fetch(`/api/facebook/pages?ad_account_id=${encodeURIComponent(selectedAccountId)}`)
       .then(async r => {
         const d = await r.json().catch(() => ({}))
+        if (cancelled) return
         if (!r.ok || d.error) {
           if (r.status === 429 || d.rateLimited || /request limit|rate limit|too many|#4/i.test(d.error || "")) {
             console.warn(`[pages] API ${r.status}:`, d.error || r.statusText)
@@ -12935,9 +13017,15 @@ function LaunchPageContent() {
         }
       })
       .catch(e => {
+        if (cancelled) return
         console.error("[pages] Fetch error:", e)
         setPagesError(e.message || "Failed to load pages")
       })
+      .finally(() => {
+        if (!cancelled) setPagesLoading(false)
+      })
+
+    return () => { cancelled = true }
   }, [activeOrgId, selectedAccountId, pagesCacheKey, pagesRateLimitKey])
 
   // Khi pages load xong hoặc account đổi → apply saved pref cho account đó
@@ -12976,7 +13064,7 @@ function LaunchPageContent() {
     if (erroredCreatives.length > 0) {
       return fail(`${erroredCreatives.length} media failed to upload. Please remove them or re-upload.`, ["creatives"])
     }
-    const pendingCreatives = selectedCreatives.filter(c => c.status !== "ready")
+    const pendingCreatives = selectedCreatives.filter(c => !isLaunchable(c))
     if (pendingCreatives.length > 0) {
       return fail(`${pendingCreatives.length} media still uploading/processing on Meta — please wait until they show "ready" then try again`, ["creatives"])
     }
@@ -13323,6 +13411,8 @@ function LaunchPageContent() {
         durationMs: data.durationMs ?? 0,
         errors: data.errors || [],
         scheduled: data.scheduled ?? null,
+        scheduleError: data.scheduleError ?? null,
+        auditError: data.auditError ?? null,
         createdAds: data.created || [],
         batchId: data.batchId || null,
         launchMeta: {
@@ -13341,7 +13431,7 @@ function LaunchPageContent() {
       setLaunchPhase("success")
       setHistoryReload(n => n + 1)
 
-      if (result.failed === 0) {
+      if (result.failed === 0 && !result.scheduleError && !result.auditError) {
         setSelectedMediaIds(new Set())
         setSelectedCreatives([])
       }
@@ -13530,6 +13620,8 @@ function LaunchPageContent() {
     const allErrors: { adSetId: string; fileName: string; error: string }[] = []
     const allCreatedAds: CreatedAd[] = []
     let lastBatchId: string | null = null
+    let scheduleError: string | null = null
+    let auditError: string | null = null
 
     const validRows = tableRows.filter(r => r.creative?.id && r.adSetIds.length > 0)
     const batchRows = validRows.map(row => {
@@ -13581,6 +13673,8 @@ function LaunchPageContent() {
       })
       const data = await res.json()
       if (res.ok) {
+        scheduleError = data.scheduleErrors?.map((item: { error: string }) => item.error).join("; ") || null
+        auditError = data.auditError ?? null
         for (const rowResult of (data.rows || [])) {
           totalCreated += rowResult.created?.length ?? 0
           totalFailed  += rowResult.errors?.length ?? 0
@@ -13602,7 +13696,9 @@ function LaunchPageContent() {
       failed: totalFailed,
       durationMs: 0,
       errors: allErrors,
-      scheduled: scheduledTime ? { at: scheduledTime, end: scheduleEndTime || null } : null,
+      scheduled: scheduledTime && !scheduleError ? { at: scheduledTime, end: scheduleEndTime || null } : null,
+      scheduleError,
+      auditError,
       createdAds: allCreatedAds,
       batchId: lastBatchId,
       launchMeta: {
@@ -13730,6 +13826,18 @@ function LaunchPageContent() {
   }
 
   const selectedPage = pages.find(p => p.id === selectedPageId)
+  const launchBootLoading = adAccountsLoading || (Boolean(activeOrgId && selectedAccountId) && pagesLoading)
+  if (launchBootLoading) {
+    return (
+      <div className="flex min-h-[calc(100vh-4rem)] items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-3 text-sm text-muted-foreground">
+          <IconLoader2 className="size-6 animate-spin text-primary" />
+          <div className="font-medium text-foreground">Loading launcher…</div>
+          <div>{adAccountsLoading ? "Loading ad accounts…" : "Loading Facebook pages…"}</div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <>

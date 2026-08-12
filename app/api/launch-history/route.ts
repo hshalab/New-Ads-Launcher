@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getAuthContext } from "@/lib/auth"
+import { getAuthContext, requireRole } from "@/lib/auth"
 import { createAdminClient } from "@/lib/supabase/admin"
 
 export async function GET(request: NextRequest) {
@@ -12,10 +12,25 @@ export async function GET(request: NextRequest) {
     const userId = url.searchParams.get("user_id")
     const status = url.searchParams.get("status")
     const batchId = url.searchParams.get("id")
-    const limit = parseInt(url.searchParams.get("limit") || "50")
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "50", 10) || 50, 1), 200)
     const trash = url.searchParams.get("trash") === "1"
+    const scheduled = url.searchParams.get("scheduled") === "1"
 
     const supabase = createAdminClient()
+    if (scheduled) {
+      let scheduledQuery = supabase
+        .from("scheduled_activations")
+        .select("id,ad_account_id,ad_ids,scheduled_at,end_time,status,error,created_at")
+        .eq("org_id", ctx.orgId)
+        .order("scheduled_at", { ascending: false })
+        .limit(limit)
+      if (accountId) scheduledQuery = scheduledQuery.eq("ad_account_id", accountId)
+      if (status && status !== "all") scheduledQuery = scheduledQuery.eq("status", status)
+      const { data: activations, error: scheduledError } = await scheduledQuery
+      if (scheduledError) return NextResponse.json({ error: scheduledError.message }, { status: 500 })
+      return NextResponse.json({ activations: activations || [] })
+    }
+
     let query = supabase
       .from("launch_batches")
       .select("*")
@@ -108,6 +123,8 @@ export async function PATCH(request: NextRequest) {
   try {
     const ctx = await getAuthContext()
     if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    const denied = requireRole(ctx, new Set(["admin", "editor"]))
+    if (denied) return denied
 
     const { ids, action } = await request.json()
     if (!ids || !Array.isArray(ids) || ids.length === 0) {
@@ -136,6 +153,8 @@ export async function DELETE(request: NextRequest) {
   try {
     const ctx = await getAuthContext()
     if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    const denied = requireRole(ctx, new Set(["admin", "editor"]))
+    if (denied) return denied
 
     const { ids } = await request.json()
     if (!ids || !Array.isArray(ids) || ids.length === 0) {

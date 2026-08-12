@@ -78,7 +78,7 @@ export async function GET() {
 
   for (const batch of launchResult.data || []) {
     if (batch.status !== "success") continue
-    const ads = Math.max(0, ((batch.total_ads as number) || 0) - ((batch.failed_ads as number) || 0))
+    const ads = Math.max(0, (batch.total_ads as number) || 0)
     if (ads === 0) continue
     const bucket = ensureWeek(isoWeekMonday(batch.created_at as string))
     const name = (batch.user_name as string | null) || "Unknown"

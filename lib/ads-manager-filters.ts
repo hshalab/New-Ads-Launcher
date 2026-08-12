@@ -344,3 +344,86 @@ export const POPULAR_FILTERS: RecentFilter[] = [
   { field: "impressions", operator: "gt", values: ["0"] },
   { field: "roas", operator: "gte", values: ["1"] },
 ]
+
+// ─── Active filter bag ────────────────────────────────────────────────────────
+// Survives refresh and in-app nav until the user clears a control. Scoped per
+// ad account so switching accounts does not leak chips/date/status.
+
+export const FILTER_STATE_KEY = "adsmanager_filter_state_v1"
+
+export interface AdsManagerFilterState {
+  tab: FilterLevel
+  search: string
+  statusFilter: "all" | "ACTIVE" | "PAUSED"
+  chips: FilterChip[]
+  campaignFilter: string[]
+  adSetFilter: string[]
+  datePreset: string
+  customDateRange: { start: string; end: string } | null
+  sortField: string | null
+  sortDir: "asc" | "desc"
+  breakdowns: string[]
+}
+
+function filterStateStorageKey(accountId: string): string {
+  return `${FILTER_STATE_KEY}:${accountId}`
+}
+
+function isFilterLevel(v: unknown): v is FilterLevel {
+  return v === "campaigns" || v === "adsets" || v === "ads"
+}
+
+function isStatusFilter(v: unknown): v is AdsManagerFilterState["statusFilter"] {
+  return v === "all" || v === "ACTIVE" || v === "PAUSED"
+}
+
+function isChipLike(v: unknown): v is FilterChip {
+  if (!v || typeof v !== "object") return false
+  const c = v as FilterChip
+  return typeof c.id === "string"
+    && typeof c.field === "string"
+    && typeof c.operator === "string"
+    && Array.isArray(c.values)
+}
+
+function isDateString(v: unknown): v is string {
+  return typeof v === "string" && Number.isFinite(new Date(v).getTime())
+}
+
+export function loadAdsManagerFilterState(accountId: string): AdsManagerFilterState | null {
+  if (typeof window === "undefined" || !accountId) return null
+  try {
+    const raw = window.localStorage.getItem(filterStateStorageKey(accountId))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<AdsManagerFilterState>
+    if (!parsed || typeof parsed !== "object") return null
+    return {
+      tab: isFilterLevel(parsed.tab) ? parsed.tab : "campaigns",
+      search: typeof parsed.search === "string" ? parsed.search : "",
+      statusFilter: isStatusFilter(parsed.statusFilter) ? parsed.statusFilter : "ACTIVE",
+      chips: Array.isArray(parsed.chips) ? parsed.chips.filter(isChipLike) : [],
+      campaignFilter: Array.isArray(parsed.campaignFilter) ? parsed.campaignFilter.filter((id): id is string => typeof id === "string") : [],
+      adSetFilter: Array.isArray(parsed.adSetFilter) ? parsed.adSetFilter.filter((id): id is string => typeof id === "string") : [],
+      datePreset: typeof parsed.datePreset === "string" && parsed.datePreset ? parsed.datePreset : "last_7d",
+      customDateRange: parsed.customDateRange
+        && isDateString(parsed.customDateRange.start)
+        && isDateString(parsed.customDateRange.end)
+        ? { start: parsed.customDateRange.start, end: parsed.customDateRange.end }
+        : null,
+      sortField: typeof parsed.sortField === "string" ? parsed.sortField : null,
+      sortDir: parsed.sortDir === "desc" ? "desc" : "asc",
+      breakdowns: Array.isArray(parsed.breakdowns)
+        ? parsed.breakdowns.filter((id): id is string => typeof id === "string")
+        : [],
+    }
+  } catch {
+    return null
+  }
+}
+
+export function saveAdsManagerFilterState(accountId: string, state: AdsManagerFilterState): void {
+  if (typeof window === "undefined" || !accountId) return
+  try {
+    window.localStorage.setItem(filterStateStorageKey(accountId), JSON.stringify(state))
+  } catch { /* quota or private mode */ }
+}

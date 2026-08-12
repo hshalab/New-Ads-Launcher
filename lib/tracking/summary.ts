@@ -31,7 +31,7 @@ export type TrackingCreative = {
 }
 
 function createdAds(batch: TrackingBatch) {
-  return Math.max(0, (batch.total_ads || 0) - (batch.failed_ads || 0))
+  return Math.max(0, batch.total_ads || 0)
 }
 
 export function summarizeLaunchBatches(batches: TrackingBatch[]) {

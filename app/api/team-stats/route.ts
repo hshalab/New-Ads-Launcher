@@ -32,7 +32,7 @@ export async function GET(request: Request) {
 
     const batches = batchesRes.data || []
     const ads = batches.reduce(
-      (sum: number, b: any) => sum + Math.max(0, (b.total_ads || 0) - (b.failed_ads || 0)),
+      (sum: number, b: any) => sum + Math.max(0, b.total_ads || 0),
       0
     )
 

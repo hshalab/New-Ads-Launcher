@@ -6,21 +6,21 @@ test("summarizes successful, non-successful, and created ads once per batch", ()
   const summary = summarizeLaunchBatches([
     { id: "gallery", user_id: "buyer-a", user_name: "Kevin", status: "success", total_ads: 3, failed_ads: 0, duration_ms: 1_000 },
     { id: "direct", user_id: "buyer-a", user_name: "Kevin", status: "partial", total_ads: 4, failed_ads: 1, duration_ms: 3_000 },
-    { id: "table", user_id: "buyer-b", user_name: "Seth", status: "failed", total_ads: 2, failed_ads: 2, duration_ms: null },
+    { id: "table", user_id: "buyer-b", user_name: "Seth", status: "failed", total_ads: 0, failed_ads: 2, duration_ms: null },
   ])
 
   assert.deepEqual(summary, {
     batches: 3,
     fullSuccess: 1,
     nonSuccess: 2,
-    adsCreated: 6,
+    adsCreated: 7,
     successRate: 33,
     averageSessionDurationMs: 2_000,
     team: [
-      { userId: "buyer-a", name: "Kevin", batches: 2, fullSuccess: 1, nonSuccess: 1, adsCreated: 6, averageSessionDurationMs: 2_000 },
+      { userId: "buyer-a", name: "Kevin", avatarUrl: null, batches: 2, fullSuccess: 1, nonSuccess: 1, adsCreated: 7, averageSessionDurationMs: 2_000 },
       // A member whose only batch recorded no duration averages to null, not to 0 —
       // "not timed" and "instant" are different facts.
-      { userId: "buyer-b", name: "Seth", batches: 1, fullSuccess: 0, nonSuccess: 1, adsCreated: 0, averageSessionDurationMs: null },
+      { userId: "buyer-b", name: "Seth", avatarUrl: null, batches: 1, fullSuccess: 0, nonSuccess: 1, adsCreated: 0, averageSessionDurationMs: null },
     ],
   })
 })

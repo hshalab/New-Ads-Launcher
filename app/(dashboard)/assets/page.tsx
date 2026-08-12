@@ -187,10 +187,71 @@ function SortTh<K extends string>({ label, keyId, sort, onSort }: { label: strin
 const PortalSortTh = SortTh<PortalSortKey>
 const AssetSortTh = SortTh<AssetSortKey>
 
+const ASSETS_FILTER_STATE_KEY = "assets_filters_v1"
+
+interface AssetsFilterState {
+  section: Section
+  search: string
+  filterType: "" | "image" | "video"
+  filterStatus: "" | "ready" | "pending"
+  filterBrand: string
+  filterProduct: string
+  filterLanguage: string
+  dateRange: string
+  dateCustomStart?: string
+  dateCustomEnd?: string
+  assetFilterAccounts: string[]
+  assetSort: AssetSort
+  portalPath: string[]
+  portalSort: PortalSort
+  portalAccountId: string
+}
+
+function loadAssetsFilterState(): AssetsFilterState | null {
+  if (typeof window === "undefined") return null
+  try {
+    const raw = window.localStorage.getItem(ASSETS_FILTER_STATE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<AssetsFilterState>
+    if (!parsed || typeof parsed !== "object") return null
+    return {
+      section: typeof parsed.section === "string" ? parsed.section as Section : "all",
+      search: typeof parsed.search === "string" ? parsed.search : "",
+      filterType: parsed.filterType === "image" || parsed.filterType === "video" ? parsed.filterType : "",
+      filterStatus: parsed.filterStatus === "ready" || parsed.filterStatus === "pending" ? parsed.filterStatus : "",
+      filterBrand: typeof parsed.filterBrand === "string" ? parsed.filterBrand : "",
+      filterProduct: typeof parsed.filterProduct === "string" ? parsed.filterProduct : "",
+      filterLanguage: typeof parsed.filterLanguage === "string" ? parsed.filterLanguage : "",
+      dateRange: typeof parsed.dateRange === "string" ? parsed.dateRange : "",
+      dateCustomStart: typeof parsed.dateCustomStart === "string" && Number.isFinite(new Date(parsed.dateCustomStart).getTime())
+        ? parsed.dateCustomStart
+        : undefined,
+      dateCustomEnd: typeof parsed.dateCustomEnd === "string" && Number.isFinite(new Date(parsed.dateCustomEnd).getTime())
+        ? parsed.dateCustomEnd
+        : undefined,
+      assetFilterAccounts: Array.isArray(parsed.assetFilterAccounts)
+        ? parsed.assetFilterAccounts.filter((id): id is string => typeof id === "string")
+        : [],
+      assetSort: parsed.assetSort && typeof parsed.assetSort === "object" && typeof (parsed.assetSort as AssetSort)?.key === "string"
+        ? parsed.assetSort as AssetSort
+        : { key: "date", dir: "desc" },
+      portalPath: Array.isArray(parsed.portalPath) ? parsed.portalPath.filter((p): p is string => typeof p === "string") : [],
+      portalSort: parsed.portalSort && typeof parsed.portalSort === "object" && typeof (parsed.portalSort as PortalSort)?.key === "string"
+        ? parsed.portalSort as PortalSort
+        : null,
+      portalAccountId: typeof parsed.portalAccountId === "string" ? parsed.portalAccountId : "",
+    }
+  } catch {
+    return null
+  }
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function AssetsPage() {
   const { selectedAccountId, adAccounts } = useAdAccount()
+  const searchParams = useSearchParams()
+  const urlSearch = searchParams.get("q") || ""
   const [section, setSection]           = useState<Section>("all")
   const [creatives, setCreatives]       = useState<Creative[]>([])
   const [boardCreatives, setBoardCreatives] = useState<Creative[]>([])
@@ -248,13 +309,75 @@ export default function AssetsPage() {
   const [requests, setRequests]         = useState<CreativeRequest[]>([])
   const [selected, setSelected]         = useState<Set<string>>(new Set())
   const [assetAnchorId, setAssetAnchorId] = useState<string | null>(null)
-  const searchParams = useSearchParams()
-  const [search, setSearch]             = useState(() => searchParams.get("q") || "")
+  const [search, setSearch]             = useState(urlSearch)
   const [filterType, setFilterType]     = useState<"" | "image" | "video">("")
   const [filterStatus, setFilterStatus] = useState<"" | "ready" | "pending">("")
   const [filterBrand, setFilterBrand]   = useState<string>("")
   const [filterProduct, setFilterProduct] = useState<string>("")
   const [filterLanguage, setFilterLanguage] = useState<string>("")
+  const [filtersHydrated, setFiltersHydrated] = useState(false)
+  const clearAssetFilters = useCallback(() => {
+    setSearch("")
+    setFilterType("")
+    setFilterStatus("")
+    setFilterBrand("")
+    setFilterProduct("")
+    setFilterLanguage("")
+    setDateRange("")
+    setDateCustomStart(undefined)
+    setDateCustomEnd(undefined)
+    setAssetFilterAccounts([])
+  }, [])
+
+  useEffect(() => {
+    const stored = loadAssetsFilterState()
+    if (stored) {
+      setSection(stored.section)
+      if (!urlSearch) setSearch(stored.search)
+      setFilterType(stored.filterType)
+      setFilterStatus(stored.filterStatus)
+      setFilterBrand(stored.filterBrand)
+      setFilterProduct(stored.filterProduct)
+      setFilterLanguage(stored.filterLanguage)
+      setDateRange(stored.dateRange)
+      setDateCustomStart(stored.dateCustomStart ? new Date(stored.dateCustomStart) : undefined)
+      setDateCustomEnd(stored.dateCustomEnd ? new Date(stored.dateCustomEnd) : undefined)
+      setAssetFilterAccounts(stored.assetFilterAccounts)
+      setAssetSort(stored.assetSort ?? { key: "date", dir: "desc" })
+      setPortalPath(stored.portalPath)
+      setPortalSort(stored.portalSort)
+      setPortalAccountId(stored.portalAccountId)
+    }
+    setFiltersHydrated(true)
+  }, [urlSearch])
+
+  useEffect(() => {
+    if (!filtersHydrated) return
+    try {
+      const next: AssetsFilterState = {
+        section,
+        search,
+        filterType,
+        filterStatus,
+        filterBrand,
+        filterProduct,
+        filterLanguage,
+        dateRange,
+        dateCustomStart: dateCustomStart?.toISOString(),
+        dateCustomEnd: dateCustomEnd?.toISOString(),
+        assetFilterAccounts,
+        assetSort,
+        portalPath,
+        portalSort,
+        portalAccountId,
+      }
+      window.localStorage.setItem(ASSETS_FILTER_STATE_KEY, JSON.stringify(next))
+    } catch { /* quota or private mode */ }
+  }, [
+    filtersHydrated, section, search, filterType, filterStatus, filterBrand, filterProduct, filterLanguage,
+    dateRange, dateCustomStart, dateCustomEnd, assetFilterAccounts, assetSort,
+    portalPath, portalSort, portalAccountId,
+  ])
   const [loadingCreatives, setLoadingCreatives] = useState(true)
   const [loadingBoards, setLoadingBoards]       = useState(false)
   const [loadingRequests, setLoadingRequests]   = useState(false)
@@ -1937,8 +2060,8 @@ export default function AssetsPage() {
                   }}
                 />
 
-                {(filterType || filterStatus || filterBrand || filterProduct || filterLanguage || dateRange) && (
-                  <button onClick={() => { setFilterType(""); setFilterStatus(""); setFilterBrand(""); setFilterProduct(""); setFilterLanguage(""); setDateRange(""); setDateCustomStart(undefined); setDateCustomEnd(undefined) }}
+                {(search || filterType || filterStatus || filterBrand || filterProduct || filterLanguage || dateRange || assetFilterAccounts.length > 0) && (
+                  <button onClick={clearAssetFilters}
                     className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 border rounded-lg">
                     <IconX className="size-3" /> Clear
                   </button>
@@ -2022,8 +2145,8 @@ export default function AssetsPage() {
                         : "Media assets sync from Creative Portal — map pending media from Portal Media."}
                     </p>
                   </div>
-                  {(search || filterType || filterStatus) ? (
-                    <Button size="sm" variant="outline" onClick={() => { setSearch(""); setFilterType(""); setFilterStatus("") }}>
+                  {(search || filterType || filterStatus || filterBrand || filterProduct || filterLanguage || dateRange || assetFilterAccounts.length > 0) ? (
+                    <Button size="sm" variant="outline" onClick={clearAssetFilters}>
                       Clear filters
                     </Button>
                   ) : (

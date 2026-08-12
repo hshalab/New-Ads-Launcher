@@ -520,6 +520,12 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
     !selectedAccountId ||
     Boolean(loadError)
 
+  // Account + Pages (+ Pixels) are required before the create flow can be filled in.
+  // Keep the shell so the user can still close; block the body until metadata lands.
+  const bootLoading =
+    accountsLoading ||
+    (!!selectedAccountId && (pagesLoading || pixelsLoading))
+
   if (!open) {
     return <CampaignPublishToast status={publishStatus} message={publishMessage} />
   }
@@ -543,7 +549,13 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
               <h2 className="truncate text-sm font-semibold text-[#1c2b33] dark:text-gray-100">
                 Create a New Campaign
               </h2>
-              <p className="truncate text-xs text-[#65676b]">{activeTitle}</p>
+              <p className="truncate text-xs text-[#65676b]">
+                {bootLoading
+                  ? accountsLoading
+                    ? "Loading ad accounts…"
+                    : "Loading Facebook pages…"
+                  : activeTitle}
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -559,105 +571,123 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
           </div>
         </div>
 
-        {(formError || mediaUploadError || loadError || createdIds?.success) && (
-          <div className="shrink-0 border-b border-[#e4e6eb] bg-white px-4 py-2 dark:border-gray-800 dark:bg-card">
-            {formError || mediaUploadError || loadError ? (
-              <div className="flex items-start gap-2 text-xs text-red-600">
-                <IconAlertCircle className="mt-0.5 size-4 shrink-0" />
-                <span>{formError || mediaUploadError || loadError}</span>
+        {bootLoading ? (
+          <div className="flex min-h-[480px] flex-1 items-center justify-center bg-white dark:bg-card">
+            <div className="flex flex-col items-center gap-3 text-sm text-muted-foreground">
+              <IconLoader2 className="size-6 animate-spin text-primary" />
+              <div className="font-medium text-foreground">Loading campaign setup…</div>
+              <div>
+                {accountsLoading
+                  ? "Loading ad accounts…"
+                  : pagesLoading
+                    ? "Loading Facebook pages…"
+                    : "Loading account metadata…"}
               </div>
-            ) : (
-              <div className="flex items-start gap-2 text-xs text-green-700">
-                <IconCheck className="mt-0.5 size-4 shrink-0" />
-                <span>Campaign created successfully.</span>
+            </div>
+          </div>
+        ) : (
+          <>
+            {(formError || mediaUploadError || loadError || createdIds?.success) && (
+              <div className="shrink-0 border-b border-[#e4e6eb] bg-white px-4 py-2 dark:border-gray-800 dark:bg-card">
+                {formError || mediaUploadError || loadError ? (
+                  <div className="flex items-start gap-2 text-xs text-red-600">
+                    <IconAlertCircle className="mt-0.5 size-4 shrink-0" />
+                    <span>{formError || mediaUploadError || loadError}</span>
+                  </div>
+                ) : (
+                  <div className="flex items-start gap-2 text-xs text-green-700">
+                    <IconCheck className="mt-0.5 size-4 shrink-0" />
+                    <span>Campaign created successfully.</span>
+                  </div>
+                )}
               </div>
             )}
-          </div>
-        )}
 
-        <div className="relative flex flex-1 overflow-hidden">
-          <div className="w-[280px] shrink-0 overflow-y-auto border-r border-[#e4e6eb] bg-white dark:border-gray-800 dark:bg-card">
-            <div className="mt-2 space-y-0.5 p-2">
-              <StepButton
-                active={activeStep === "campaign"}
-                icon={IconFolder}
-                label={state.campaignName || "New Campaign"}
-                onClick={() => setActiveStep("campaign")}
-              />
-              <div className="relative pl-[21px]">
-                <div className="absolute bottom-0 left-[21px] top-0 w-px bg-[#e4e6eb] dark:bg-gray-800" />
-                <StepButton
-                  active={activeStep === "adset"}
-                  nested
-                  icon={IconTable}
-                  label={state.adSetName || "New Ad Set"}
-                  onClick={() => setActiveStep("adset")}
-                />
-                <div className="relative pl-[21px]">
-                  <div className="absolute bottom-1/2 left-[21px] top-0 w-px bg-[#e4e6eb] dark:bg-gray-800" />
+            <div className="relative flex flex-1 overflow-hidden">
+              <div className="w-[280px] shrink-0 overflow-y-auto border-r border-[#e4e6eb] bg-white dark:border-gray-800 dark:bg-card">
+                <div className="mt-2 space-y-0.5 p-2">
                   <StepButton
-                    active={activeStep === "ad"}
-                    nested
-                    icon={IconLayoutGrid}
-                    label={state.adName || "New Ad"}
-                    onClick={() => setActiveStep("ad")}
+                    active={activeStep === "campaign"}
+                    icon={IconFolder}
+                    label={state.campaignName || "New Campaign"}
+                    onClick={() => setActiveStep("campaign")}
                   />
+                  <div className="relative pl-[21px]">
+                    <div className="absolute bottom-0 left-[21px] top-0 w-px bg-[#e4e6eb] dark:bg-gray-800" />
+                    <StepButton
+                      active={activeStep === "adset"}
+                      nested
+                      icon={IconTable}
+                      label={state.adSetName || "New Ad Set"}
+                      onClick={() => setActiveStep("adset")}
+                    />
+                    <div className="relative pl-[21px]">
+                      <div className="absolute bottom-1/2 left-[21px] top-0 w-px bg-[#e4e6eb] dark:bg-gray-800" />
+                      <StepButton
+                        active={activeStep === "ad"}
+                        nested
+                        icon={IconLayoutGrid}
+                        label={state.adName || "New Ad"}
+                        onClick={() => setActiveStep("ad")}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex min-w-0 flex-1 flex-col bg-white dark:bg-card">
+                <div className="flex-1 overflow-y-auto">
+                  {activeStep === "campaign" && (
+                  <CampaignLevel state={state} update={update} currency={currency} invalidFields={invalidFields} />
+                  )}
+                  {activeStep === "adset" && (
+                    <AdSetLevel
+                      state={state}
+                      update={update}
+                      pixels={pixels}
+                      pixelsLoading={pixelsLoading}
+                      currency={currency}
+                      timezoneName={selectedAccount?.timezone_name}
+                      invalidFields={invalidFields}
+                    />
+                  )}
+                  {activeStep === "ad" && (
+                    <AdLevel
+                      state={state}
+                      update={update}
+                      pages={pages}
+                      pagesLoading={pagesLoading}
+                      instagramAccounts={instagramAccounts}
+                      instagramLoading={instagramLoading}
+                      mediaUploading={isUploadingMedia}
+                      mediaUploadError={mediaUploadError}
+                      onSelectMediaFile={handleMediaFileSelected}
+                      onClearUploadedCreative={clearUploadedCreative}
+                      adAccountId={selectedAccountId}
+                      adAccountName={selectedAccount?.name || selectedAccountId}
+                      invalidFields={invalidFields}
+                    />
+                  )}
+                </div>
+                <div className="flex shrink-0 justify-end border-t border-[#e4e6eb] px-6 py-3 dark:border-gray-800">
+                  {activeStep === "ad" ? (
+                    <Button
+                      onClick={handlePublish}
+                      disabled={publishDisabled}
+                      className="bg-[#31a24c] px-5 font-semibold text-white hover:bg-[#2b9244]"
+                    >
+                      Publish
+                    </Button>
+                  ) : (
+                    <Button onClick={handleSaveAndContinue} className="bg-[#1877f2] px-5 font-semibold text-white hover:bg-[#166fe5]">
+                      Save and continue
+                    </Button>
+                  )}
                 </div>
               </div>
             </div>
-          </div>
-
-          <div className="flex min-w-0 flex-1 flex-col bg-white dark:bg-card">
-            <div className="flex-1 overflow-y-auto">
-              {activeStep === "campaign" && (
-              <CampaignLevel state={state} update={update} currency={currency} invalidFields={invalidFields} />
-              )}
-              {activeStep === "adset" && (
-                <AdSetLevel
-                  state={state}
-                  update={update}
-                  pixels={pixels}
-                  pixelsLoading={pixelsLoading}
-                  currency={currency}
-                  timezoneName={selectedAccount?.timezone_name}
-                  invalidFields={invalidFields}
-                />
-              )}
-              {activeStep === "ad" && (
-                <AdLevel
-                  state={state}
-                  update={update}
-                  pages={pages}
-                  pagesLoading={pagesLoading}
-                  instagramAccounts={instagramAccounts}
-                  instagramLoading={instagramLoading}
-                  mediaUploading={isUploadingMedia}
-                  mediaUploadError={mediaUploadError}
-                  onSelectMediaFile={handleMediaFileSelected}
-                  onClearUploadedCreative={clearUploadedCreative}
-                  adAccountId={selectedAccountId}
-                  adAccountName={selectedAccount?.name || selectedAccountId}
-                  invalidFields={invalidFields}
-                />
-              )}
-            </div>
-            <div className="flex shrink-0 justify-end border-t border-[#e4e6eb] px-6 py-3 dark:border-gray-800">
-              {activeStep === "ad" ? (
-                <Button
-                  onClick={handlePublish}
-                  disabled={publishDisabled}
-                  className="bg-[#31a24c] px-5 font-semibold text-white hover:bg-[#2b9244]"
-                >
-                  Publish
-                </Button>
-              ) : (
-                <Button onClick={handleSaveAndContinue} className="bg-[#1877f2] px-5 font-semibold text-white hover:bg-[#166fe5]">
-                  Save and continue
-                </Button>
-              )}
-            </div>
-          </div>
-        </div>
+          </>
+        )}
       </div>
     </div>
     </>

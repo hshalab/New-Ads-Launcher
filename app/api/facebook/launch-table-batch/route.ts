@@ -78,7 +78,7 @@ export async function POST(request: NextRequest) {
       .in("id", allCreativeIds)
       .eq("org_id", ctx.orgId)
 
-    const notReady = (allCreatives || []).filter((c: any) => c.status !== "ready")
+    const notReady = (allCreatives || []).filter((c: any) => !isLaunchable(c))
     if (notReady.length > 0) {
       const names = notReady.map((c: any) => `"${c.file_name}" (${c.status})`).join(", ")
       return NextResponse.json({
@@ -318,13 +318,18 @@ export async function POST(request: NextRequest) {
     }).select("id").single()
 
     if (batchErr) console.error("[launch-table-batch] Failed to save batch record:", batchErr)
+    const auditError = batchErr
+      ? `Ads were created in Meta, but Launch History could not be saved: ${batchErr.message}`
+      : null
+
+    const scheduleErrors: { scheduledStart: string; error: string }[] = []
 
     // Save scheduled activations per row
     for (const row of rowResults) {
       if (row.scheduledStart && row.created.length > 0) {
         const adIds = row.created.map((c: any) => c.adId).filter(Boolean) as string[]
         if (adIds.length > 0) {
-          await adminDb.from("scheduled_activations").insert({
+          const { error: activationError } = await adminDb.from("scheduled_activations").insert({
             org_id: ctx.orgId,
             ad_account_id: adAccountId,
             ad_ids: adIds,
@@ -332,11 +337,22 @@ export async function POST(request: NextRequest) {
             end_time: row.scheduledEnd || null,
             status: "pending",
           })
+          if (activationError) {
+            const error = `Ads were created PAUSED, but scheduling failed: ${activationError.message}`
+            row.scheduleError = error
+            scheduleErrors.push({ scheduledStart: row.scheduledStart, error })
+          }
         }
       }
     }
 
     const batchId = batchRecord?.id || null
+    if (batchId && scheduleErrors.length > 0) {
+      await adminDb.from("launch_batches").update({
+        status: "partial",
+        errors: [...allErrors, ...scheduleErrors.map(item => ({ type: "schedule", ...item }))],
+      }).eq("id", batchId)
+    }
 
     // Table mode launches many rows at once, so a partial failure is the common case,
     // not the edge case — it is the one this route most needs to report.
@@ -348,7 +364,7 @@ export async function POST(request: NextRequest) {
       adAccountName: adAccountName || adAccountId,
       targetName: finalAdSetNames[0] || originalAdSetNames[0] || null,
       created: totalCreated,
-      failed: totalFailed,
+      failed: totalFailed + scheduleErrors.length,
       source: "launch-table-batch",
     })
 
@@ -363,9 +379,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       batchId,
+      auditError,
       rows: rowResults.map(r => ({ ...r, batchId })),
       totalCreated,
       totalFailed,
+      scheduleErrors,
       durationMs: Date.now() - startTime,
     })
   } catch (err: any) {

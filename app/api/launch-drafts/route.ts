@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getAuthContext } from "@/lib/auth"
+import { getAuthContext, requireRole } from "@/lib/auth"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { recordActivity } from "@/lib/notifications/emit"
 
@@ -102,6 +102,8 @@ export async function POST(request: NextRequest) {
   try {
     const ctx = await getAuthContext()
     if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    const denied = requireRole(ctx)
+    if (denied) return denied
 
     const db = createAdminClient()
     const body = await request.json()
@@ -176,6 +178,8 @@ export async function DELETE(request: NextRequest) {
   try {
     const ctx = await getAuthContext()
     if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    const denied = requireRole(ctx)
+    if (denied) return denied
 
     const id = new URL(request.url).searchParams.get("id")
     if (!id) return NextResponse.json({ error: "id required" }, { status: 400 })
