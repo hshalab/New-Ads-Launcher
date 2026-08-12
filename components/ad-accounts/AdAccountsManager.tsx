@@ -3,13 +3,16 @@
 import { useCallback, useEffect, useState } from "react"
 import { AdAccountPill } from "@/components/shared/ad-account-pill"
 import { AccountOverviewCards } from "@/components/ad-accounts/AccountOverviewCards"
+import { RemovedAccountDetail } from "@/components/ad-accounts/RemovedAccountDetail"
 import { AdsDateRangePicker, getPresetRange } from "@/components/ads-manager/AdsDateRangePicker"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import {
   IconAlertCircle,
+  IconArchive,
   IconArrowsSort,
+  IconChevronDown,
   IconLoader2,
   IconRefresh,
   IconSearch,
@@ -34,6 +37,24 @@ interface ManagedAdAccount {
   business?: { id: string; name?: string }
   owner_business?: { id: string; name?: string }
   ownership?: AccountOwnership
+}
+
+/**
+ * An account this org used to hold and no longer does — reconstructed from snapshot history by
+ * `/api/facebook/ad-accounts/removed`. Historical figures only: never selectable, never editable.
+ */
+interface RemovedAdAccount {
+  id: string
+  account_id: string
+  name: string
+  currency: string
+  account_status: number | null
+  amount_spent: string | null
+  spend_cap: string | null
+  timezone_name: string | null
+  owner_business: { id: string; name?: string } | null
+  ownership: string
+  last_seen_at: string | null
 }
 
 interface AccountMetricSnapshot {
@@ -61,6 +82,12 @@ const ACCOUNT_STATUS_LABELS: Record<number, string> = {
 const ZERO_DECIMAL_CURRENCIES = new Set([
   "BIF","CLP","DJF","GNF","JPY","KMF","KRW","MGA","PYG","RWF","UGX","VND","VUV","XAF","XOF","XPF",
 ])
+
+/**
+ * The API returns up to 200 snapshots per account. Rendering all of them buries the recent changes
+ * a human is actually looking for, so the table opens on the newest 20 and grows on demand.
+ */
+const SPENDING_LIMIT_PAGE_SIZE = 20
 
 function parseMinorMoney(value?: string | number | null, currency = "USD") {
   if (value === undefined || value === null || value === "") return null
@@ -135,6 +162,11 @@ export function AdAccountsManager() {
   const [acctDateTo, setAcctDateTo] = useState("")
   const [historicalAccounts, setHistoricalAccounts] = useState<AccountMetricSnapshot[]>([])
   const [historicalLoading, setHistoricalLoading] = useState(false)
+  const [limitRowsShown, setLimitRowsShown] = useState(SPENDING_LIMIT_PAGE_SIZE)
+  const [removedAccounts, setRemovedAccounts] = useState<RemovedAdAccount[]>([])
+  const [removedLoading, setRemovedLoading] = useState(false)
+  const [removedOpen, setRemovedOpen] = useState(false)
+  const [removedDetail, setRemovedDetail] = useState<RemovedAdAccount | null>(null)
 
   const fetchAccounts = useCallback(async (refresh = false) => {
     if (refresh) setSyncing(true)
@@ -181,6 +213,11 @@ export function AdAccountsManager() {
     }
   }, [activeTab, selectedAccountId, fetchLimitSnapshots])
 
+  // A different account or date range is a different list — never carry the expanded window over.
+  useEffect(() => {
+    setLimitRowsShown(SPENDING_LIMIT_PAGE_SIZE)
+  }, [selectedAccountId, dateFrom, dateTo])
+
   const fetchHistoricalAccounts = useCallback(async (from: string, to: string) => {
     if (!from && !to) { setHistoricalAccounts([]); return }
     setHistoricalLoading(true)
@@ -203,6 +240,23 @@ export function AdAccountsManager() {
       fetchHistoricalAccounts(acctDateFrom, acctDateTo)
     }
   }, [activeTab, acctDateFrom, acctDateTo, fetchHistoricalAccounts])
+
+  // Read-only history, independent of the live Meta call: it must still render when Meta is
+  // unreachable, which is exactly when someone is asking what happened to an account.
+  const fetchRemovedAccounts = useCallback(async () => {
+    setRemovedLoading(true)
+    try {
+      const res = await fetch("/api/facebook/ad-accounts/removed")
+      const data = await res.json()
+      setRemovedAccounts(data.accounts || [])
+    } catch {
+      setRemovedAccounts([])
+    } finally {
+      setRemovedLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchRemovedAccounts() }, [fetchRemovedAccounts])
 
   const filteredAccounts = accounts.filter(account => {
     const text = `${account.account_id} ${account.name}`.toLowerCase()
@@ -277,6 +331,9 @@ export function AdAccountsManager() {
         return true
       })
   })()
+
+  const visibleSpendingLimitRows = spendingLimitRows.slice(0, limitRowsShown)
+  const hiddenSpendingLimitRows = spendingLimitRows.length - visibleSpendingLimitRows.length
 
   const hasDateFilter = Boolean(dateFrom || dateTo)
 
@@ -628,6 +685,89 @@ export function AdAccountsManager() {
             <span className="font-semibold text-muted-foreground">{accounts.length}</span> accounts,{" "}
             <span className="font-semibold text-[#007D1E]">{activeCount}</span> active.
           </p>
+
+          {/* â”€â”€ Removed from Business Portfolio (read-only history) â”€â”€ */}
+          {!removedLoading && removedAccounts.length > 0 && (
+            <div className="overflow-hidden rounded-xl border border-border bg-card">
+              <button
+                type="button"
+                onClick={() => setRemovedOpen(open => !open)}
+                className="flex w-full items-center gap-3 px-5 py-3 text-left transition-colors hover:bg-muted/50"
+              >
+                <IconArchive className="size-4 shrink-0 text-muted-foreground" />
+                <span className="text-sm font-semibold text-foreground">
+                  Removed from Business Portfolio ({removedAccounts.length})
+                </span>
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                  Read-only
+                </span>
+                <IconChevronDown
+                  className={cn("ml-auto size-4 text-muted-foreground transition-transform", removedOpen && "rotate-180")}
+                />
+              </button>
+
+              {removedOpen && (
+                <>
+                  <p className="border-t border-border bg-muted/30 px-5 py-2 text-xs text-muted-foreground">
+                    Accounts AdLauncher has synced before and Meta no longer returns for this connection.
+                    The figures below are the last values recorded locally, not live data â€” they cannot be
+                    edited, refreshed or selected. Click a row to see its spend history.
+                  </p>
+                  <div className="overflow-x-auto">
+                    <table data-table="comfortable" className="w-full min-w-[1000px]">
+                      <thead>
+                        <tr className="border-y border-border bg-muted/50">
+                          {["#", "Account ID", "Name", "Type", "Owner", "Last status", "Currency", "Spend Cap", "Spent", "Last seen"].map(label => (
+                            <th key={label} className="px-3 text-left text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                              {label}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {removedAccounts.map((account, index) => {
+                          const currency = account.currency || "USD"
+                          return (
+                            <tr
+                              key={account.id}
+                              onClick={() => setRemovedDetail(account)}
+                              className="cursor-pointer border-b border-border transition-colors last:border-0 hover:bg-muted/50"
+                              title="View spend history"
+                            >
+                              <td className="px-5 text-sm text-muted-foreground/50">{index + 1}</td>
+                              <td className="px-3 font-mono text-xs text-muted-foreground">{account.account_id}</td>
+                              <td className="px-3 text-sm font-semibold text-muted-foreground">{account.name}</td>
+                              <td className="px-3 text-sm text-muted-foreground">
+                                {account.ownership === "own" ? "Own" : account.ownership === "agency" ? "Agency/Shared" : "Personal"}
+                              </td>
+                              <td className="px-3 text-sm text-muted-foreground">
+                                {account.owner_business?.name || account.owner_business?.id || "-"}
+                              </td>
+                              <td className="px-3 text-sm text-muted-foreground">
+                                {account.account_status == null
+                                  ? "-"
+                                  : ACCOUNT_STATUS_LABELS[account.account_status] || `status ${account.account_status}`}
+                              </td>
+                              <td className="px-3 text-sm text-muted-foreground">{currency}</td>
+                              <td className="px-3 text-right text-sm text-muted-foreground">
+                                {formatAccountMoney(account.spend_cap, currency)}
+                              </td>
+                              <td className="px-3 text-right text-sm text-muted-foreground">
+                                {formatAccountMoney(account.amount_spent, currency)}
+                              </td>
+                              <td className="px-5 text-sm text-muted-foreground">{formatDateTime(account.last_seen_at)}</td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          <RemovedAccountDetail account={removedDetail} onClose={() => setRemovedDetail(null)} />
         </>
 
       ) : (
@@ -666,7 +806,7 @@ export function AdAccountsManager() {
                       : "No spending limit snapshots yet. Click Sync Meta to save the first snapshot."}
                   </td>
                 </tr>
-              ) : spendingLimitRows.map(row => (
+              ) : visibleSpendingLimitRows.map(row => (
                 <tr key={row.id} className="border-b border-border last:border-0 transition-colors hover:bg-muted/50">
                   <td className="px-5 text-sm text-foreground">{formatDateTime(row.startDate)}</td>
                   <td className="px-3 text-sm text-foreground">
@@ -685,6 +825,19 @@ export function AdAccountsManager() {
               ))}
             </tbody>
           </table>
+          {hiddenSpendingLimitRows > 0 && (
+            <div className="flex items-center justify-center gap-3 border-t border-border px-5 py-3">
+              <span className="text-xs text-muted-foreground">
+                Showing {visibleSpendingLimitRows.length} of {spendingLimitRows.length} changes
+              </span>
+              <button
+                onClick={() => setLimitRowsShown(shown => shown + SPENDING_LIMIT_PAGE_SIZE)}
+                className="rounded-full bg-primary/10 px-4 py-1.5 text-xs font-semibold text-primary transition-colors hover:bg-primary/15"
+              >
+                Load {Math.min(hiddenSpendingLimitRows, SPENDING_LIMIT_PAGE_SIZE)} more
+              </button>
+            </div>
+          )}
         </div>
       </>
       )}

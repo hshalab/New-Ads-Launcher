@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import { IconMapPin, IconSearch, IconX } from "@tabler/icons-react"
+import { GeoMap, type GeoMapPoint } from "@/components/ads-manager/GeoMap"
 import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 
@@ -64,28 +65,16 @@ type Row = {
   label: string
   detail: string
   radius?: number
+  radiusUnit?: "mile" | "kilometer"
+  /** ISO-2 country, when Meta supplied one. Drives the map's centroid fallback. */
+  country?: string
+  /** Geocoder input for the map. Absent on countries — those resolve from the centroid table. */
+  query?: string
   /** Sub-key of the geo object this row lives in, used by the remove/update paths. */
   bucket: keyof GeoLocations
 }
 
 const RADIUS_OPTIONS = [10, 25, 50]
-
-/**
- * Approximate centroids for the markets this product actually buys in. Used only to place a dot on
- * the schematic map — never sent to Meta, never used for targeting maths. A real tile map with
- * drop-pin and true radius circles is BL-50; this is the honest version of "show me where".
- */
-const COUNTRY_CENTROIDS: Record<string, [number, number]> = {
-  AE: [54, 24], AR: [-64, -34], AT: [14, 47], AU: [134, -25], BE: [4, 50], BR: [-52, -10],
-  CA: [-106, 56], CH: [8, 47], CL: [-71, -35], CN: [104, 35], CO: [-74, 4], CZ: [15, 50],
-  DE: [10, 51], DK: [10, 56], EG: [30, 27], ES: [-4, 40], FI: [26, 64], FR: [2, 46],
-  GB: [-2, 54], GR: [22, 39], HK: [114, 22], HU: [20, 47], ID: [113, -1], IE: [-8, 53],
-  IL: [35, 31], IN: [79, 22], IT: [12, 42], JP: [138, 36], KR: [128, 36], MX: [-102, 23],
-  MY: [102, 4], NG: [8, 9], NL: [5, 52], NO: [9, 61], NZ: [174, -41], PH: [122, 12],
-  PK: [70, 30], PL: [19, 52], PT: [-8, 39], RO: [25, 46], RU: [100, 60], SA: [45, 24],
-  SE: [17, 62], SG: [104, 1], TH: [101, 15], TR: [35, 39], TW: [121, 24], UA: [32, 49],
-  US: [-97, 38], VN: [108, 16], ZA: [24, -29],
-}
 
 /**
  * Publish guard: Meta rejects an ad set whose `geo_locations` selects nothing. Counts the location
@@ -129,29 +118,55 @@ function rowsFrom(geo: GeoLocations | undefined, scope: Scope): Row[] {
   if (!geo) return []
   const rows: Row[] = []
   for (const code of geo.countries || []) {
-    rows.push({ scope, kind: "country", key: code, label: code, detail: "Country", bucket: "countries" })
+    rows.push({ scope, kind: "country", key: code, label: code, detail: "Country", country: code, bucket: "countries" })
   }
   for (const region of geo.regions || []) {
-    rows.push({ scope, kind: "region", key: String(region.key), label: region.name || String(region.key), detail: "Region", bucket: "regions" })
+    const label = region.name || String(region.key)
+    rows.push({ scope, kind: "region", key: String(region.key), label, detail: "Region", country: region.country, query: label, bucket: "regions" })
   }
   for (const city of geo.cities || []) {
+    const label = [city.name, city.region].filter(Boolean).join(", ") || String(city.key)
     rows.push({
       scope,
       kind: "city",
       key: String(city.key),
-      label: [city.name, city.region].filter(Boolean).join(", ") || String(city.key),
+      label,
       detail: city.radius ? `City · +${city.radius} ${city.distance_unit === "kilometer" ? "km" : "mi"}` : "City",
       radius: city.radius,
+      radiusUnit: city.distance_unit,
+      country: city.country,
+      query: label,
       bucket: "cities",
     })
   }
   for (const zip of geo.zips || []) {
-    rows.push({ scope, kind: "zip", key: String(zip.key), label: zip.name || String(zip.key), detail: "Zip", bucket: "zips" })
+    const label = zip.name || String(zip.key)
+    rows.push({ scope, kind: "zip", key: String(zip.key), label, detail: "Zip", country: zip.country, query: label, bucket: "zips" })
   }
   for (const market of geo.geo_markets || []) {
-    rows.push({ scope, kind: "other", key: String(market.key), label: market.name || String(market.key), detail: "DMA region", bucket: "geo_markets" })
+    const label = market.name || String(market.key)
+    rows.push({ scope, kind: "other", key: String(market.key), label, detail: "DMA region", country: market.country, query: label, bucket: "geo_markets" })
   }
   return rows
+}
+
+/**
+ * Rows → map points. Radius is converted to miles here because Meta stores the unit alongside the
+ * number and the map only speaks one unit.
+ */
+function toMapPoints(rows: Row[]): GeoMapPoint[] {
+  return rows.map(row => ({
+    id: `${row.scope}-${row.bucket}-${row.key}`,
+    scope: row.scope,
+    kind: row.kind,
+    label: row.label,
+    detail: row.detail,
+    country: row.country,
+    query: row.query,
+    radiusMiles: row.radius === undefined
+      ? undefined
+      : row.radiusUnit === "kilometer" ? row.radius / 1.60934 : row.radius,
+  }))
 }
 
 /** Every location type Meta returned that this UI has no row renderer for, so it is visibly kept. */
@@ -166,52 +181,6 @@ function unmanagedSummary(geo: GeoLocations | undefined): string[] {
     notes.push(`${geo.location_cluster_ids.length} location cluster(s)`)
   }
   return notes
-}
-
-function GeoMiniMap({ rows }: { rows: Row[] }) {
-  // Equirectangular: lon -180..180 → 0..360, lat 90..-90 → 0..180.
-  const pins = rows
-    .map(row => {
-      const code = row.kind === "country" ? row.key : row.key.split(":")[0]
-      const centroid = COUNTRY_CENTROIDS[code] || COUNTRY_CENTROIDS[(row.detail.match(/[A-Z]{2}/) || [])[0] || ""]
-      if (!centroid) return null
-      return { ...row, x: centroid[0] + 180, y: 90 - centroid[1] }
-    })
-    .filter(Boolean) as Array<Row & { x: number; y: number }>
-
-  return (
-    <div className="overflow-hidden rounded-md border border-input bg-[#eaf0f6] dark:bg-slate-900">
-      <svg viewBox="0 0 360 180" className="block h-36 w-full" role="img" aria-label="Schematic map of selected locations">
-        {[30, 60, 90, 120, 150].map(y => (
-          <line key={`h${y}`} x1="0" y1={y} x2="360" y2={y} stroke="currentColor" strokeWidth="0.4" className="text-slate-300 dark:text-slate-700" />
-        ))}
-        {[60, 120, 180, 240, 300].map(x => (
-          <line key={`v${x}`} x1={x} y1="0" x2={x} y2="180" stroke="currentColor" strokeWidth="0.4" className="text-slate-300 dark:text-slate-700" />
-        ))}
-        {pins.map(pin => (
-          <g key={`${pin.scope}-${pin.key}`}>
-            <circle
-              cx={pin.x}
-              cy={pin.y}
-              r={pin.kind === "country" ? 6 : 4}
-              className={pin.scope === "exclude" ? "fill-red-500/70" : "fill-blue-500/70"}
-            />
-            <text x={pin.x} y={pin.y - 8} textAnchor="middle" className="fill-slate-600 dark:fill-slate-300" style={{ fontSize: 7 }}>
-              {pin.label.length > 16 ? `${pin.label.slice(0, 15)}…` : pin.label}
-            </text>
-          </g>
-        ))}
-        {pins.length === 0 && (
-          <text x="180" y="94" textAnchor="middle" className="fill-slate-500" style={{ fontSize: 9 }}>
-            No mappable locations selected
-          </text>
-        )}
-      </svg>
-      <p className="border-t border-input bg-background/60 px-2 py-1 text-[10px] text-muted-foreground">
-        Schematic view — approximate country positions. Drop-pin and true radius circles need a tile provider (BL-50).
-      </p>
-    </div>
-  )
 }
 
 export function LocationsField({
@@ -238,6 +207,7 @@ export function LocationsField({
   const includeRows = useMemo(() => rowsFrom(geo, "include"), [geo])
   const excludeRows = useMemo(() => rowsFrom(excluded, "exclude"), [excluded])
   const allRows = useMemo(() => [...includeRows, ...excludeRows], [includeRows, excludeRows])
+  const mapPoints = useMemo(() => toMapPoints(allRows), [allRows])
   const keptNotes = useMemo(() => [...unmanagedSummary(geo), ...unmanagedSummary(excluded)], [geo, excluded])
 
   useEffect(() => {
@@ -443,7 +413,7 @@ export function LocationsField({
         </div>
       )}
 
-      <GeoMiniMap rows={allRows} />
+      <GeoMap points={mapPoints} />
     </div>
   )
 }

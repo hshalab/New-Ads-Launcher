@@ -1,7 +1,9 @@
 "use client"
 
 import { useEffect, useState, type ReactNode } from "react"
+import { useRouter } from "next/navigation"
 import { IconCheck, IconLoader2 } from "@tabler/icons-react"
+import { useAdAccount } from "@/lib/ad-account-context"
 import { cn } from "@/lib/utils"
 
 type AccountOwnership = "own" | "agency" | "unknown"
@@ -124,6 +126,11 @@ function Card({ title, tag, children }: { title: string; tag?: string; children:
 }
 
 export function AccountOverviewCards({ account }: { account: OverviewAccount | undefined }) {
+  const router = useRouter()
+  // This page keeps its own account list and does not read the provider for selection (see
+  // AdAccountsManager). It does write to it here, so that following "View more" lands on Insights
+  // already pointed at the account whose numbers were just on screen.
+  const { setSelectedAccountId } = useAdAccount()
   const [oppScore, setOppScore] = useState<number | null>(null)
   const [oppLoading, setOppLoading] = useState(false)
   const [oppAvailable, setOppAvailable] = useState(false)
@@ -187,6 +194,13 @@ export function AccountOverviewCards({ account }: { account: OverviewAccount | u
         ? { title: "Create or sync active campaigns", body: "No active campaign returned for the last 7 days on this account.", cta: "Create campaign" }
         : { title: "Review weekly delivery", body: "Check active campaigns with spend but no purchases before scaling budget.", cta: "View campaigns" }
 
+  // "View more" on a results tile means "show me the ads behind this number" — Insights is the
+  // surface that breaks purchases and cost-per-purchase down by campaign, ad and creative.
+  const openInsights = () => {
+    setSelectedAccountId(account.id || account.account_id)
+    router.push("/insights")
+  }
+
   return (
     <div className="space-y-4">
       {/* Hero */}
@@ -238,8 +252,8 @@ export function AccountOverviewCards({ account }: { account: OverviewAccount | u
 
         <Card title="Latest results" tag="Last 7 days">
           <div className="grid gap-3 p-4 sm:grid-cols-3">
-            <MetricTile label="Purchases" value={insightsLoading ? "…" : purchases.toLocaleString()} link="View more" />
-            <MetricTile label="Per purchase" value={insightsLoading ? "…" : perPurchase == null ? "—" : formatMajorMoney(perPurchase, currency)} link="View more" />
+            <MetricTile label="Purchases" value={insightsLoading ? "…" : purchases.toLocaleString()} link="View more" onLink={openInsights} />
+            <MetricTile label="Per purchase" value={insightsLoading ? "…" : perPurchase == null ? "—" : formatMajorMoney(perPurchase, currency)} link="View more" onLink={openInsights} />
             <MetricTile label="Amount spent" value={insightsLoading ? "…" : formatMajorMoney(latestSpend, currency, true)} />
           </div>
         </Card>
@@ -341,12 +355,30 @@ function Stat({ label, value, accent }: { label: string; value: string; accent?:
   )
 }
 
-function MetricTile({ label, value, link }: { label: string; value: string; link?: string }) {
+function MetricTile({
+  label,
+  value,
+  link,
+  onLink,
+}: {
+  label: string
+  value: string
+  link?: string
+  onLink?: () => void
+}) {
   return (
     <div>
       <div className="text-sm font-semibold text-foreground">{label}</div>
       <div className="mt-1 text-3xl font-normal leading-none text-foreground">{value}</div>
-      {link && <button className="mt-2 text-sm font-medium text-primary">{link}</button>}
+      {link && (
+        <button
+          type="button"
+          onClick={onLink}
+          className="mt-2 text-sm font-medium text-primary hover:underline"
+        >
+          {link}
+        </button>
+      )}
     </div>
   )
 }
