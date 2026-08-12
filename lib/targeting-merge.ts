@@ -19,6 +19,7 @@
  */
 export const EDITOR_OWNED_TARGETING_KEYS = [
   "geo_locations",
+  "excluded_geo_locations",
   "age_min",
   "age_max",
   "genders",
@@ -31,8 +32,20 @@ export const EDITOR_OWNED_TARGETING_KEYS = [
  * Keys where *absence* in the draft is itself the edit. Advantage+ placements are expressed by
  * having no platform lists at all, so the editor deletes these rather than sending an empty
  * array. For every other owned key, absence means "not loaded" and the remote value survives.
+ *
+ * `excluded_geo_locations` joined this list when the Locations editor shipped an Exclude control:
+ * removing the last exclusion is expressed by the key being gone, so without it here a removal
+ * would silently bounce back from the remote read on the next publish. This is only safe because
+ * the ad set detail read now requests the key — see
+ * `app/api/facebook/adsets/[id]/detail/route.ts`. Adding a removable key without also hydrating
+ * it recreates TD-37 in the opposite direction: absence would mean "never loaded" and we would
+ * delete a value the user never touched.
  */
-export const REMOVABLE_TARGETING_KEYS = ["publisher_platforms", "device_platforms"] as const
+export const REMOVABLE_TARGETING_KEYS = [
+  "publisher_platforms",
+  "device_platforms",
+  "excluded_geo_locations",
+] as const
 
 /** Meta rejects position lists for platforms that are not selected. */
 const POSITION_KEY_BY_PLATFORM: Record<string, string> = {

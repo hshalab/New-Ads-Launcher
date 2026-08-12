@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import {
   IconChevronDown, IconDownload, IconHistory, IconLoader2, IconPlus, IconCalendar,
   IconSettings, IconX, IconDots, IconMessageCircle, IconChartLine, IconPencil,
-  IconEye, IconLayoutSidebarLeftCollapse, IconListCheck,
+  IconEye, IconLayoutSidebarLeftCollapse, IconLayoutSidebarLeftExpand, IconListCheck,
 } from "@tabler/icons-react"
 import {
   Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer,
@@ -18,6 +18,12 @@ import type { Level, ReportRow } from "./InsightDrawers"
 import { AdsDateRangePicker } from "./AdsDateRangePicker"
 import { UnifiedWorkspaceEditor, type WorkspaceNode } from "./UnifiedWorkspaceEditor"
 import { workspaceDraftChangeLabels } from "@/lib/ads-manager-bulk-drafts"
+import {
+  clearEditorDrafts,
+  flushEditorDrafts,
+  loadEditorDrafts,
+  saveEditorDrafts,
+} from "@/lib/editor-drafts"
 
 type Tab = "trends" | "breakdowns"
 
@@ -227,6 +233,7 @@ export function PerformancePopup({
   campaigns, adSets, ads, onDuplicate, onDelete, onEdit, onViewHistory,
   attributionWindows, initialView = "charts", onSaveEdit, onCreate,
   onCreateReplacement, unifiedWorkspace = false, canMutate = false, onPublished,
+  shell = "modal", canCollapse = false,
 }: {
   mode: "charts" | "compare"
   level: Level
@@ -251,10 +258,22 @@ export function PerformancePopup({
   unifiedWorkspace?: boolean
   canMutate?: boolean
   onPublished?: () => void
+  /**
+   * "modal" is the legacy centred dialog, still used by compare mode. "page" is the routed editor:
+   * it fills the Ads Manager main area and can collapse to an overlay that leaves the live table
+   * visible on the left.
+   */
+  shell?: "modal" | "page"
+  /**
+   * Whether an Ads Manager table is actually mounted behind this shell. False on a hard load of
+   * /ads-manager/editor — collapsing would then reveal an empty pane, so the control is disabled.
+   */
+  canCollapse?: boolean
 }) {
   const baseCapped = rows.slice(0, MAX_ROWS)
   const overCap = rows.length > MAX_ROWS
   const isCompare = mode === "compare"
+  const isPage = shell === "page"
 
   // ── States ────────────────────────────────────────────────────────────────
   const [tab, setTab] = useState<Tab>("trends")
@@ -282,6 +301,12 @@ export function PerformancePopup({
   const [previewMode, setPreviewMode] = useState("all")
   const [commentsFilter, setCommentsFilter] = useState("facebook_feed")
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  /**
+   * Collapsed = Meta's "Collapse view": the editor becomes an overlay on the right and the live
+   * Ads Manager table on the left becomes the navigator. Exactly one navigator is visible at a
+   * time, which is why the hierarchy tree is not rendered here (it would float over the form).
+   */
+  const [collapsed, setCollapsed] = useState(false)
   const [prefBenchmark, setPrefBenchmark] = useState(true)
   const [prefSimilar, setPrefSimilar] = useState(true)
   const [customizeTab, setCustomizeTab] = useState<"metrics" | "preferences">("metrics")
@@ -341,6 +366,34 @@ export function PerformancePopup({
   const workspaceDirty = Object.keys(workspaceDrafts).length > 0
   const historyRef = useRef<HTMLDivElement>(null)
   const workspaceContentRef = useRef<HTMLDivElement>(null)
+
+  // ── Draft survival ─────────────────────────────────────────────────────────
+  // Staged edits used to live only in this component's state, which was safe while the editor was
+  // a modal that never unmounted. It is a route now: navigating between nodes, or refreshing,
+  // unmounts it. sessionStorage carries the drafts across that gap. See lib/editor-drafts.ts.
+  const draftsHydrated = useRef(false)
+  const workspaceDraftsRef = useRef(workspaceDrafts)
+  workspaceDraftsRef.current = workspaceDrafts
+
+  useEffect(() => {
+    if (!unifiedWorkspace || !accountId) return
+    draftsHydrated.current = false
+    const stored = loadEditorDrafts<WorkspaceNode>(accountId)
+    if (Object.keys(stored).length > 0) setWorkspaceDrafts(stored)
+    draftsHydrated.current = true
+  }, [unifiedWorkspace, accountId])
+
+  useEffect(() => {
+    // Guarded on hydration so the initial empty state cannot erase what was just restored.
+    if (!unifiedWorkspace || !accountId || !draftsHydrated.current) return
+    saveEditorDrafts(accountId, workspaceDrafts)
+  }, [unifiedWorkspace, accountId, workspaceDrafts])
+
+  useEffect(() => {
+    if (!unifiedWorkspace || !accountId) return
+    // The 300ms debounce loses the last keystroke on a fast unmount; flush synchronously instead.
+    return () => flushEditorDrafts(accountId, workspaceDraftsRef.current)
+  }, [unifiedWorkspace, accountId])
 
   // The parent lists can be one cursor page. Merge them with the editor's targeted
   // hierarchy reads so opening an Ad does not lose its campaign siblings.
@@ -424,6 +477,7 @@ export function PerformancePopup({
   useEffect(() => {
     if (!unifiedWorkspace || !workspaceDirty) return
     const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (accountId) flushEditorDrafts(accountId, workspaceDraftsRef.current)
       event.preventDefault()
       event.returnValue = ""
     }
@@ -444,7 +498,7 @@ export function PerformancePopup({
       window.removeEventListener("beforeunload", beforeUnload)
       window.removeEventListener("keydown", onKeyDown)
     }
-  }, [unifiedWorkspace, workspaceDirty])
+  }, [unifiedWorkspace, workspaceDirty, accountId])
 
   const publishWorkspaceChanges = async () => {
     const entries = Object.entries(workspaceDrafts)
@@ -1197,21 +1251,33 @@ export function PerformancePopup({
     setWorkspaceView("history")
   }
 
-  return (
-    <TooltipProvider>
-      <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-        <div
-          className="bg-background rounded-2xl shadow-2xl flex flex-col overflow-auto resize"
-          style={{
-            width: "96vw",
-            height: "94vh",
-            minWidth: 640,
-            minHeight: 400,
-            maxWidth: "98vw",
-            maxHeight: "98vh"
-          }}
-        >
+  // Collapsed view hands navigation to the table behind it, so the hierarchy column stands down.
+  const treeVisible = sidebarOpen && !(isPage && collapsed)
+  // In page mode the editor renders its own breadcrumb, title, status and ⋯ menu — the shared top
+  // chrome. Repeating the name here is the duplication requirement #5 called out.
+  const showShellHeader = !isPage || effectiveWorkspaceView !== "edit"
+
+  const shellCard = (
+    <div
+      className={cn(
+        isPage
+          ? cn(
+            "absolute inset-y-0 right-0 z-40 flex flex-col overflow-hidden bg-background",
+            collapsed ? "left-[32%] border-l shadow-2xl" : "left-0",
+          )
+          : "bg-background rounded-2xl shadow-2xl flex flex-col overflow-auto resize",
+      )}
+      style={isPage ? undefined : {
+        width: "96vw",
+        height: "94vh",
+        minWidth: 640,
+        minHeight: 400,
+        maxWidth: "98vw",
+        maxHeight: "98vh",
+      }}
+    >
           {/* Header */}
+          {showShellHeader && (
           <div className="flex items-center justify-between px-5 py-3 border-b shrink-0">
             <div className="min-w-0">
               <p className="text-xs text-muted-foreground uppercase tracking-wide">
@@ -1225,6 +1291,7 @@ export function PerformancePopup({
               <IconX className="size-4" />
             </button>
           </div>
+          )}
 
           {/* Body */}
           <div className="flex-1 min-h-0 flex overflow-hidden">
@@ -1270,17 +1337,39 @@ export function PerformancePopup({
                 </button>
               )}
               <div className="flex-1" />
-              <button
-                type="button"
-                onClick={() => setSidebarOpen(open => !open)}
-                className="grid size-9 place-items-center rounded-lg text-slate-300 hover:bg-white/10 hover:text-white"
-                aria-label="Toggle hierarchy"
-                title="Toggle hierarchy"
-              >
-                <IconLayoutSidebarLeftCollapse className="size-4.5" />
-              </button>
+              {isPage ? (
+                // In page mode this slot is the shell control, not the tree control: it collapses
+                // the editor to an overlay so the live table behind becomes the navigator.
+                <button
+                  type="button"
+                  onClick={() => setCollapsed(open => !open)}
+                  disabled={!canCollapse}
+                  className="grid size-9 place-items-center rounded-lg text-slate-300 hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+                  aria-label={collapsed ? "Expand to full page" : "Collapse view"}
+                  aria-pressed={collapsed}
+                  title={
+                    canCollapse
+                      ? (collapsed ? "Expand to full page" : "Collapse view — keep the table visible")
+                      : "Collapse needs the Ads Manager table behind it — open the editor from the table"
+                  }
+                >
+                  {collapsed
+                    ? <IconLayoutSidebarLeftExpand className="size-4.5" />
+                    : <IconLayoutSidebarLeftCollapse className="size-4.5" />}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setSidebarOpen(open => !open)}
+                  className="grid size-9 place-items-center rounded-lg text-slate-300 hover:bg-white/10 hover:text-white"
+                  aria-label="Toggle hierarchy"
+                  title="Toggle hierarchy"
+                >
+                  <IconLayoutSidebarLeftCollapse className="size-4.5" />
+                </button>
+              )}
             </nav>}
-            {sidebarOpen && (
+            {treeVisible && (
               <aside className="w-80 shrink-0 border-r bg-muted/20 overflow-y-auto p-3">
                 {unifiedWorkspace ? (
                   <div className="flex items-center gap-2 mb-3">
@@ -1418,6 +1507,11 @@ export function PerformancePopup({
                   void publishWorkspaceChanges()
                 }}
                 publishing={workspacePublishing}
+                draftCount={Object.keys(workspaceDrafts).length}
+                onTogglePanel={unifiedWorkspace ? () => setSidebarOpen(open => !open) : undefined}
+                panelOpen={treeVisible}
+                panelDisabled={isPage && collapsed}
+                panelDisabledHint="Hierarchy is off in collapsed view — navigate with the table on the left"
               />
             ) : effectiveWorkspaceView === "review" ? (
               <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
@@ -1472,6 +1566,7 @@ export function PerformancePopup({
                     <button
                       onClick={() => {
                         setWorkspaceDrafts({})
+                        if (accountId) clearEditorDrafts(accountId)
                         setWorkspacePublishResults([])
                       }}
                       disabled={workspacePublishing || Object.keys(workspaceDrafts).length === 0}
@@ -2053,12 +2148,13 @@ export function PerformancePopup({
             <div className="absolute inset-0 z-30 grid place-items-center bg-black/45 p-4">
               <div className="w-full max-w-md rounded-xl border bg-background p-5 shadow-2xl">
                 <h3 className="font-semibold">Discard staged changes?</h3>
-                <p className="mt-2 text-sm text-muted-foreground">Your in-memory draft will be lost. Published changes are not affected.</p>
+                <p className="mt-2 text-sm text-muted-foreground">Your staged changes will be lost, including the copy kept for this browser tab. Published changes are not affected.</p>
                 <div className="mt-5 flex justify-end gap-2">
                   <button onClick={() => setWorkspaceDiscardConfirm(false)} className="h-9 rounded-lg border px-3 text-sm hover:bg-muted/50">Keep editing</button>
                   <button
                     onClick={() => {
                       setWorkspaceDrafts({})
+                      if (accountId) clearEditorDrafts(accountId)
                       setWorkspaceDiscardConfirm(false)
                       onClose()
                     }}
@@ -2068,8 +2164,16 @@ export function PerformancePopup({
               </div>
             </div>
           )}
+    </div>
+  )
+
+  return (
+    <TooltipProvider>
+      {isPage ? shellCard : (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          {shellCard}
         </div>
-      </div>
+      )}
     </TooltipProvider>
   )
 }

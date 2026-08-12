@@ -26,7 +26,9 @@ export async function GET(
       "pacing_type",
       "optimization_goal", "billing_event", "bid_strategy", "bid_amount",
       "destination_type", "attribution_spec", "promoted_object{pixel_id,custom_event_type}",
-      "targeting{geo_locations,age_min,age_max,genders,custom_audiences,excluded_custom_audiences,flexible_spec,targeting_optimization,publisher_platforms,device_platforms,facebook_positions,instagram_positions,audience_network_positions,messenger_positions}",
+      // excluded_geo_locations must stay hydrated: it is a REMOVABLE_TARGETING_KEYS member, so an
+      // unhydrated absence would be read as "the user removed every exclusion" at publish time.
+      "targeting{geo_locations,excluded_geo_locations,age_min,age_max,genders,custom_audiences,excluded_custom_audiences,flexible_spec,targeting_optimization,publisher_platforms,device_platforms,facebook_positions,instagram_positions,audience_network_positions,messenger_positions}",
       "campaign_id",
       "ads.summary(true){id}",
     ].join(",")

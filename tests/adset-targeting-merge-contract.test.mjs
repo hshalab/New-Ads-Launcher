@@ -3,7 +3,11 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 
-import { mergeEditorTargeting, EDITOR_OWNED_TARGETING_KEYS } from "../lib/targeting-merge.ts"
+import {
+  mergeEditorTargeting,
+  EDITOR_OWNED_TARGETING_KEYS,
+  REMOVABLE_TARGETING_KEYS,
+} from "../lib/targeting-merge.ts"
 
 const root = process.cwd()
 const read = path => readFileSync(join(root, path), "utf8")
@@ -11,7 +15,6 @@ const read = path => readFileSync(join(root, path), "utf8")
 // Keys the editor's detail read never requests. Meta replaces `targeting` wholesale, so if a
 // publish forwards the draft as-is these are erased. This is the TD-37 regression set.
 const UNREAD_KEYS = {
-  excluded_geo_locations: { countries: ["CA"] },
   locales: [6, 24],
   exclusions: { interests: [{ id: "1", name: "Cats" }] },
   targeting_automation: { advantage_audience: 1 },
@@ -21,6 +24,7 @@ const UNREAD_KEYS = {
 const remoteTargeting = () => ({
   ...UNREAD_KEYS,
   geo_locations: { countries: ["US"], location_types: ["home"] },
+  excluded_geo_locations: { countries: ["CA"] },
   age_min: 18,
   age_max: 65,
   genders: [],
@@ -33,6 +37,7 @@ const remoteTargeting = () => ({
 /** What the editor holds after a partial detail read — note the unread keys are simply absent. */
 const draftFromPartialRead = () => ({
   geo_locations: { countries: ["US"], location_types: ["home"] },
+  excluded_geo_locations: { countries: ["CA"] },
   age_min: 18,
   age_max: 65,
   genders: [],
@@ -122,6 +127,41 @@ describe("TD-37 · ad set targeting merge", () => {
 
     const { targeting } = mergeEditorTargeting(remote, draft)
     assert.deepEqual(targeting.custom_audiences, [{ id: "1", name: "Buyers", extra: true }])
+  })
+
+  it("removing the last exclusion is expressed by absence, not an empty object", () => {
+    // The Locations editor returns `undefined` when the last excluded location is deleted.
+    // Without excluded_geo_locations in REMOVABLE_TARGETING_KEYS the remote value would win and
+    // the removal would silently bounce back.
+    const draft = draftFromPartialRead()
+    delete draft.excluded_geo_locations
+
+    const { targeting, changed } = mergeEditorTargeting(remoteTargeting(), draft)
+
+    assert.equal(changed, true)
+    assert.ok(!("excluded_geo_locations" in targeting))
+  })
+
+  it("edits an exclusion rather than dropping it when the draft still carries one", () => {
+    const draft = draftFromPartialRead()
+    draft.excluded_geo_locations = { countries: ["CA", "MX"] }
+
+    const { targeting, changed } = mergeEditorTargeting(remoteTargeting(), draft)
+
+    assert.equal(changed, true)
+    assert.deepEqual(targeting.excluded_geo_locations, { countries: ["CA", "MX"] })
+  })
+
+  it("every removable key is hydrated by the ad set detail read", () => {
+    // A removable key that the detail read does not request means "never loaded" would be
+    // indistinguishable from "the user deleted it" — TD-37 in reverse.
+    const detailRoute = read("app/api/facebook/adsets/[id]/detail/route.ts")
+    for (const key of REMOVABLE_TARGETING_KEYS) {
+      assert.ok(
+        detailRoute.includes(key),
+        `${key} is removable, so the detail read must hydrate it`
+      )
+    }
   })
 
   it("survives a remote read that returned no targeting at all", () => {

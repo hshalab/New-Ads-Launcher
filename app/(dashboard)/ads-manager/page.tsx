@@ -1339,7 +1339,24 @@ function AdsManagerContent() {
     setPerformancePopup({ mode: "charts", rows: [toReportRow(clicked)], initialView: "charts" })
   const openWorkspaceEditor = (clicked: { id: string; name: string }) => {
     if (workspaceAccess.enabled) {
-      setPerformancePopup({ mode: "charts", rows: [toReportRow(clicked)], initialView: "edit" })
+      // The editor is a route, not a popup: /ads-manager/editor is intercepted by the @editor slot
+      // so this table stays mounted underneath and Collapse view has something to reveal.
+      const editorLevel: Level = tab === "campaigns" ? "campaign" : tab === "adsets" ? "adset" : "ad"
+      const source: any =
+        campaigns.find(item => item.id === clicked.id)
+        || adSets.find(item => item.id === clicked.id)
+        || ads.find(item => item.id === clicked.id)
+        || {}
+      const editorParams = new URLSearchParams({
+        account: selectedAccountId,
+        level: editorLevel,
+        id: clicked.id,
+        view: "edit",
+        date: datePreset,
+      })
+      if (source.campaign_id) editorParams.set("campaign", source.campaign_id)
+      if (source.adset_id) editorParams.set("adset", source.adset_id)
+      router.push(`/ads-manager/editor?${editorParams.toString()}`)
       return
     }
     const node = campaigns.find(item => item.id === clicked.id)

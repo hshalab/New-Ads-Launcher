@@ -5,6 +5,7 @@ import {
   IconCheck,
   IconChevronRight,
   IconDots,
+  IconLayoutSidebarLeftCollapse,
   IconPhoto,
   IconPlayerPlay,
   IconSearch,
@@ -15,6 +16,7 @@ import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 import type { Level } from "./InsightDrawers"
 import { LoadMediaModal } from "@/components/shared/load-media-modal"
+import { LocationsField, hasAnyLocation, type GeoLocations } from "./LocationsField"
 import type { Creative } from "@/types/creative"
 
 type FbPage = {
@@ -49,7 +51,8 @@ export type WorkspaceNode = {
     custom_event_type?: string
   }
   targeting?: {
-    geo_locations?: { countries?: string[] }
+    geo_locations?: GeoLocations
+    excluded_geo_locations?: GeoLocations
     age_min?: number
     age_max?: number
     genders?: number[]
@@ -116,6 +119,13 @@ type Props = {
   onDiscard?: () => void
   onPublish?: () => void
   publishing?: boolean
+  /** Total staged drafts across every node, shown on Publish so the count is the same at all three levels. */
+  draftCount?: number
+  /** Hierarchy panel control, hoisted into the shared top chrome. Omitted → no button rendered. */
+  onTogglePanel?: () => void
+  panelOpen?: boolean
+  panelDisabled?: boolean
+  panelDisabledHint?: string
 }
 
 const CTA_LABEL: Record<string, string> = {
@@ -244,14 +254,6 @@ function Section({
   )
 }
 
-function HiddenNote({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="rounded-r-md border-l-[3px] border-muted-foreground/40 bg-muted/30 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-      {children}
-    </div>
-  )
-}
-
 function SplitBlock({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="overflow-hidden rounded-md border border-[#e4e6eb] dark:border-gray-800">
@@ -327,6 +329,56 @@ function StatusToggle({
   )
 }
 
+/**
+ * Primary text in the preview, clamped the way Facebook clamps it: four lines, then "See more".
+ *
+ * Line-clamped rather than character-counted — a character budget mis-truncates German compounds
+ * and emoji-heavy copy, and Meta itself clamps by rendered lines. The toggle is only rendered when
+ * the text actually overflows, measured after layout, so short copy gets no dangling control.
+ * `text` is a key input: switching ads remounts the measurement and collapses the new body.
+ */
+function ClampedPrimaryText({ text }: { text: string }) {
+  const ref = useRef<HTMLParagraphElement>(null)
+  const [expanded, setExpanded] = useState(false)
+  const [overflowing, setOverflowing] = useState(false)
+
+  useEffect(() => {
+    setExpanded(false)
+  }, [text])
+
+  useEffect(() => {
+    const element = ref.current
+    if (!element) return
+    const measure = () => setOverflowing(element.scrollHeight - element.clientHeight > 1)
+    // Collapsed height is what decides whether a toggle is needed, so only measure then.
+    if (!expanded) measure()
+    const observer = new ResizeObserver(() => { if (!expanded) measure() })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [text, expanded])
+
+  return (
+    <div className="px-3 pb-2">
+      <p
+        ref={ref}
+        className={cn("whitespace-pre-wrap text-xs leading-relaxed", !expanded && "line-clamp-4")}
+      >
+        {text}
+      </p>
+      {(overflowing || expanded) && (
+        <button
+          type="button"
+          onClick={() => setExpanded(open => !open)}
+          className="mt-0.5 text-xs font-semibold text-muted-foreground hover:underline"
+          aria-expanded={expanded}
+        >
+          {expanded ? "See less" : "See more"}
+        </button>
+      )}
+    </div>
+  )
+}
+
 function AdPreview({ node }: { node: WorkspaceNode }) {
   const thumbnail = node.thumb_url || node?.creative?.thumbnail_url || node?.creative?.image_url
   const videoId = node.video_id || node?.creative?.video_id
@@ -355,7 +407,7 @@ function AdPreview({ node }: { node: WorkspaceNode }) {
           <p className="text-[10px] text-muted-foreground">Sponsored · Public</p>
         </div>
       </div>
-      <p className="whitespace-pre-wrap px-3 pb-2 text-xs leading-relaxed">{body}</p>
+      <ClampedPrimaryText text={body} />
       <div className="relative flex aspect-square items-center justify-center bg-neutral-100 dark:bg-neutral-900">
         {videoSrc ? (
           <video
@@ -411,6 +463,11 @@ export function UnifiedWorkspaceEditor({
   onDiscard,
   onPublish,
   publishing = false,
+  draftCount = 0,
+  onTogglePanel,
+  panelOpen = false,
+  panelDisabled = false,
+  panelDisabledHint,
 }: Props) {
   const [draft, setDraft] = useState<WorkspaceNode | null>(node)
   const [mediaPickerOpen, setMediaPickerOpen] = useState(false)
@@ -566,7 +623,10 @@ export function UnifiedWorkspaceEditor({
         : [hierarchyPath?.campaign, hierarchyPath?.adset, hierarchyPath?.ad || draft.name]
   ).filter(Boolean) as string[]
   const statusOn = (draft.status || "PAUSED") === "ACTIVE"
-  const countries = draft.targeting?.geo_locations?.countries || []
+  // The trailing crumb IS the title — rendering the name again below it was the duplication in the
+  // top chrome that made campaign / ad set / ad look like three different editors.
+  const parentCrumbs = crumbs.slice(0, -1)
+  const titleCrumb = crumbs[crumbs.length - 1] || draft.name || typeLabel
   const customAudiences = draft.targeting?.custom_audiences || []
   const excludedCustomAudiences = draft.targeting?.excluded_custom_audiences || []
   const currentPage = draft.page_id ? pages.find(page => page.id === draft.page_id) || { id: draft.page_id, name: draft.page_id } : null
@@ -614,6 +674,15 @@ export function UnifiedWorkspaceEditor({
   // An existing-post / dark-post ad cannot have its Page swapped by replaceAdCreative.
   const pageLocked = Boolean(draft.object_story_id)
 
+  // Publish blockers, evaluated once so the footer can say WHY it is disabled instead of just
+  // greying out. Same list at all three levels; only the applicable ones fire.
+  const blockers = [
+    !draft.name?.trim() ? "Name is required" : null,
+    level === "adset" && !hasAnyLocation(draft.targeting?.geo_locations)
+      ? "Add at least one location — Meta rejects an empty location set"
+      : null,
+  ].filter(Boolean) as string[]
+
   const copyId = async () => {
     try {
       await navigator.clipboard.writeText(draft.id)
@@ -624,112 +693,125 @@ export function UnifiedWorkspaceEditor({
   }
 
   return (
-    <div className={cn(
-      "grid h-full min-h-0 grid-cols-1 bg-[#f5f6f7] dark:bg-background",
-      level === "ad" && "xl:grid-cols-[minmax(420px,1fr)_minmax(320px,420px)]",
-    )}>
-      <div className={cn(
-        "flex min-h-0 min-w-0 flex-col bg-white dark:bg-card",
-        level === "ad" && "xl:border-r",
-      )}>
-        <div className="shrink-0 border-b border-[#e4e6eb] bg-white px-6 py-3 dark:border-gray-800 dark:bg-card">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
-            <div className="min-w-0 flex-1">
-              {crumbs.length > 0 ? (
-                <nav className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground" aria-label="Hierarchy path">
-                  {crumbs.map((name, index) => (
-                    <span key={`${name}-${index}`} className="inline-flex min-w-0 items-center gap-1">
-                      {index > 0 && <IconChevronRight className="size-3.5 shrink-0 text-muted-foreground/70" />}
-                      <span className={cn("max-w-[200px] truncate", index === crumbs.length - 1 && "font-semibold text-foreground")}>
-                        {name}
-                      </span>
-                    </span>
-                  ))}
-                </nav>
-              ) : (
-                <p className="text-xs text-muted-foreground">{typeLabel}</p>
-              )}
-              <div className="mt-1 flex items-center gap-2">
-                <h1 className="truncate text-lg font-bold text-[#1c2b33] dark:text-gray-100">{draft.name || typeLabel}</h1>
-                {hasDraft && (
-                  <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:ring-emerald-800">
-                    Draft
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-2">
-                <span className={cn("text-xs font-semibold", statusOn ? "text-emerald-700" : "text-muted-foreground")}>
-                  {statusOn ? "On" : "Off"}
+    <div className="flex h-full min-h-0 flex-col bg-[#f5f6f7] dark:bg-background">
+      {/* Top chrome and footer span the full width at every level. At Ad level the preview column
+          starts below the chrome rather than beside it — as grid siblings the preview frame cut
+          into the breadcrumb row, and Ad stopped matching Campaign and Ad set. */}
+      <div className="shrink-0 border-b border-[#e4e6eb] bg-white px-6 py-3 dark:border-gray-800 dark:bg-card">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
+          {onTogglePanel && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-8 shrink-0"
+              aria-label={panelOpen ? "Hide hierarchy" : "Show hierarchy"}
+              aria-pressed={Boolean(panelOpen)}
+              disabled={panelDisabled}
+              title={panelDisabled ? panelDisabledHint : undefined}
+              onClick={onTogglePanel}
+            >
+              <IconLayoutSidebarLeftCollapse className="size-4" />
+            </Button>
+          )}
+          <div className="min-w-0 flex-1">
+            <nav className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground" aria-label="Hierarchy path">
+              <span className="shrink-0 uppercase tracking-wider">{typeLabel}</span>
+              {parentCrumbs.map((name, index) => (
+                <span key={`${name}-${index}`} className="inline-flex min-w-0 items-center gap-1">
+                  <IconChevronRight className="size-3.5 shrink-0 text-muted-foreground/70" />
+                  <span className="max-w-[200px] truncate">{name}</span>
                 </span>
-                <StatusToggle
-                  value={draft.status || "PAUSED"}
-                  onChange={status => setDraft({ ...draft, status })}
-                  disabled={readOnly}
-                />
-              </div>
-              <div className="relative" ref={menuRef}>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  className="size-8"
-                  aria-label="More options"
-                  aria-expanded={menuOpen}
-                  onClick={() => setMenuOpen(open => !open)}
-                >
-                  <IconDots className="size-4" />
-                </Button>
-                {menuOpen && (
-                  <div className="absolute right-0 z-30 mt-1 w-52 rounded-md border bg-background py-1 shadow-lg">
-                    <button
-                      type="button"
-                      className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/50"
-                      onClick={() => {
-                        setMenuOpen(false)
-                        onReview?.()
-                      }}
-                    >
-                      Review and publish
-                    </button>
-                    <button
-                      type="button"
-                      className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/50 disabled:opacity-40"
-                      disabled={!hasDraft || readOnly}
-                      onClick={() => {
-                        setMenuOpen(false)
-                        onDiscard?.()
-                      }}
-                    >
-                      Discard draft
-                    </button>
-                    <div className="my-1 border-t" />
-                    <button
-                      type="button"
-                      className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/50"
-                      onClick={() => void copyId()}
-                    >
-                      Copy ID
-                    </button>
-                    <div className="my-1 border-t" />
-                    <button type="button" className="block w-full cursor-not-allowed px-3 py-2 text-left text-xs text-muted-foreground opacity-50" disabled>
-                      Duplicate · soon
-                    </button>
-                    <button type="button" className="block w-full cursor-not-allowed px-3 py-2 text-left text-xs text-muted-foreground opacity-50" disabled>
-                      Create ad · soon
-                    </button>
-                    <button type="button" className="block w-full cursor-not-allowed px-3 py-2 text-left text-xs text-muted-foreground opacity-50" disabled>
-                      Create rule · soon
-                    </button>
-                  </div>
-                )}
-              </div>
+              ))}
+            </nav>
+            <div className="mt-1 flex items-center gap-2">
+              <h1 className="truncate text-lg font-bold text-[#1c2b33] dark:text-gray-100">{titleCrumb}</h1>
+              {hasDraft && (
+                <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:ring-emerald-800">
+                  Draft
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <span className={cn("text-xs font-semibold", statusOn ? "text-emerald-700" : "text-muted-foreground")}>
+                {statusOn ? "On" : "Off"}
+              </span>
+              <StatusToggle
+                value={draft.status || "PAUSED"}
+                onChange={status => setDraft({ ...draft, status })}
+                disabled={readOnly}
+              />
+            </div>
+            <div className="relative" ref={menuRef}>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="size-8"
+                aria-label="More options"
+                aria-expanded={menuOpen}
+                onClick={() => setMenuOpen(open => !open)}
+              >
+                <IconDots className="size-4" />
+              </Button>
+              {menuOpen && (
+                <div className="absolute right-0 z-30 mt-1 w-52 rounded-md border bg-background py-1 shadow-lg">
+                  <button
+                    type="button"
+                    className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/50"
+                    onClick={() => {
+                      setMenuOpen(false)
+                      onReview?.()
+                    }}
+                  >
+                    Review and publish
+                  </button>
+                  <button
+                    type="button"
+                    className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/50 disabled:opacity-40"
+                    disabled={!hasDraft || readOnly}
+                    onClick={() => {
+                      setMenuOpen(false)
+                      onDiscard?.()
+                    }}
+                  >
+                    Discard draft
+                  </button>
+                  <div className="my-1 border-t" />
+                  <button
+                    type="button"
+                    className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/50"
+                    onClick={() => void copyId()}
+                  >
+                    Copy ID
+                  </button>
+                  <div className="my-1 border-t" />
+                  <button type="button" className="block w-full cursor-not-allowed px-3 py-2 text-left text-xs text-muted-foreground opacity-50" disabled>
+                    Duplicate · soon
+                  </button>
+                  <button type="button" className="block w-full cursor-not-allowed px-3 py-2 text-left text-xs text-muted-foreground opacity-50" disabled>
+                    Create ad · soon
+                  </button>
+                  <button type="button" className="block w-full cursor-not-allowed px-3 py-2 text-left text-xs text-muted-foreground opacity-50" disabled>
+                    Create rule · soon
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
+      </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className={cn(
+        "grid min-h-0 flex-1 grid-cols-1",
+        level === "ad" && "xl:grid-cols-[minmax(420px,1fr)_minmax(320px,420px)]",
+      )}>
+        <div className={cn(
+          "min-h-0 overflow-y-auto bg-white dark:bg-card",
+          level === "ad" && "xl:border-r",
+        )}>
           <div className="mx-auto max-w-4xl space-y-6 px-6 py-6">
             {error && (
               <div className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
@@ -1089,42 +1171,22 @@ export function UnifiedWorkspaceEditor({
                         <p className="text-xs text-muted-foreground">
                           We won&apos;t reach people beyond these selections.
                         </p>
-                        <div className="space-y-1.5">
-                          <Label className="text-xs text-muted-foreground">Locations (include)</Label>
-                          {countries.length > 0 ? (
-                            <div className="min-h-10 rounded-md border border-input bg-background p-2">
-                              <div className="flex flex-wrap gap-2">
-                                {countries.map(code => (
-                                  <span key={code} className="inline-flex items-center gap-1.5 rounded-sm bg-blue-100 px-2 py-0.5 text-xs text-blue-700">
-                                    {code}
-                                    <button
-                                      type="button"
-                                      aria-label={`Remove ${code}`}
-                                      onClick={() => {
-                                        const next = countries.filter(c => c !== code)
-                                        setDraft({
-                                          ...draft,
-                                          targeting: {
-                                            ...draft.targeting,
-                                            geo_locations: { ...draft.targeting?.geo_locations, countries: next },
-                                          },
-                                        })
-                                      }}
-                                    >×</button>
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-                          ) : (
-                            <p className="rounded-md border border-dashed bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                              No locations loaded
-                            </p>
-                          )}
-                        </div>
-                        <HiddenNote>
-                          Locations exclude · Languages · App install status · Saved audience — not shown until read and
-                          write seams exist for them.
-                        </HiddenNote>
+                        <LocationsField
+                          geo={draft.targeting?.geo_locations}
+                          excluded={draft.targeting?.excluded_geo_locations}
+                          accountId={accountId}
+                          readOnly={readOnly}
+                          onChange={({ geo, excluded }) => setDraft({
+                            ...draft,
+                            targeting: {
+                              ...draft.targeting,
+                              geo_locations: geo,
+                              // Absent, not empty — `excluded_geo_locations` is a removable key and
+                              // undefined is how "remove every exclusion" reaches Meta.
+                              excluded_geo_locations: excluded,
+                            },
+                          })}
+                        />
                         <div className="space-y-1.5">
                           <Label className="text-xs text-muted-foreground">Minimum age (control)</Label>
                           <select
@@ -1350,25 +1412,9 @@ export function UnifiedWorkspaceEditor({
                       {positionSummary.length > 0 && (
                         <ReadOnlyChips label="Positions set in Meta" values={positionSummary} />
                       )}
-                      <HiddenNote>
-                        The full position matrix (feed, reels, stories…), placement value rules, brand safety and
-                        inventory filters, and publisher block lists are not available here.
-                      </HiddenNote>
                     </div>
                   </Section>
-
-                  <HiddenNote>
-                    Not available here: the location map and Drop Pin, bulk location upload, saved audiences, audience
-                    suggestions from Meta, and the ad set recommendation cards.
-                  </HiddenNote>
                 </>
-              )}
-
-              {level === "campaign" && (
-                <HiddenNote>
-                  Not available here: campaign recommendations, Advantage+ campaign banners and suggested ads. These are
-                  Meta-native surfaces with no app API.
-                </HiddenNote>
               )}
 
               {level === "ad" && (
@@ -1560,56 +1606,59 @@ export function UnifiedWorkspaceEditor({
                       </div>
                     </div>
                   </Section>
-                  <HiddenNote>
-                    Not shown here: <strong>Tracking</strong> (website events, app events, offline events, URL
-                    parameters) — the editor has no write path for <code>tracking_specs</code> or{" "}
-                    <code>url_tags</code>. Also absent: <strong>Languages &amp; translations</strong> and{" "}
-                    <strong>Create template</strong>. Edit these in Meta Ads Manager.
-                  </HiddenNote>
                 </>
               )}
             </fieldset>
           </div>
         </div>
 
-        <div className="shrink-0 space-y-3 border-t border-[#e4e6eb] bg-white px-6 py-3 dark:border-gray-800 dark:bg-card">
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
-            By clicking Publish, you acknowledge that your use of Meta&apos;s ad tools is subject to our Terms and Conditions.
-          </p>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <Button type="button" variant="outline" onClick={onClose}>
-              Close
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={onDiscard}
-              disabled={!hasDraft || readOnly || publishing}
-            >
-              Discard draft
-            </Button>
-            <Button
-              type="button"
-              onClick={onPublish}
-              disabled={!hasDraft || readOnly || publishing || !draft.name?.trim()}
-            >
-              {publishing ? "Publishing…" : "Publish"}
-            </Button>
-          </div>
-        </div>
+        {level === "ad" && (
+          <aside className="min-h-0 space-y-4 overflow-y-auto bg-[#f5f6f7] p-5 dark:bg-background">
+            <section className="rounded-lg border border-[#e4e6eb] bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-card">
+              <p className="mb-3 text-sm font-semibold">Preview</p>
+              <AdPreview node={draft} />
+              <p className="mt-3 text-xs text-muted-foreground">
+                Built from this draft, not Meta&apos;s own preview. Advanced multi-placement preview is deferred to BL-39.
+              </p>
+            </section>
+          </aside>
+        )}
       </div>
 
-      {level === "ad" && (
-        <aside className="min-h-0 space-y-4 overflow-y-auto bg-[#f5f6f7] p-5 dark:bg-background">
-          <section className="rounded-lg border border-[#e4e6eb] bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-card">
-            <p className="mb-3 text-sm font-semibold">Preview</p>
-            <AdPreview node={draft} />
-            <p className="mt-3 text-xs text-muted-foreground">
-              Built from this draft, not Meta&apos;s own preview. Advanced multi-placement preview is deferred to BL-39.
-            </p>
-          </section>
-        </aside>
-      )}
+      <div className="shrink-0 space-y-3 border-t border-[#e4e6eb] bg-white px-6 py-3 dark:border-gray-800 dark:bg-card">
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          By clicking Publish, you acknowledge that your use of Meta&apos;s ad tools is subject to our Terms and Conditions.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="min-w-0 flex-1 text-[11px] text-muted-foreground">
+            {hasDraft && blockers.length > 0 ? (
+              <span className="text-red-600 dark:text-red-400">{blockers.join(" · ")}</span>
+            ) : draftCount > 0 ? (
+              `${draftCount} unpublished change${draftCount === 1 ? "" : "s"} across this workspace`
+            ) : (
+              "No unpublished changes"
+            )}
+          </p>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Close
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onDiscard}
+            disabled={!hasDraft || readOnly || publishing}
+          >
+            Discard draft
+          </Button>
+          <Button
+            type="button"
+            onClick={onPublish}
+            disabled={!hasDraft || readOnly || publishing || blockers.length > 0}
+          >
+            {publishing ? "Publishing…" : draftCount > 1 ? `Publish (${draftCount})` : "Publish"}
+          </Button>
+        </div>
+      </div>
     </div>
   )
 }
