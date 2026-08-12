@@ -1160,6 +1160,9 @@ export async function createAdSet(
     destination_type?: string
     promoted_object?: Record<string, any>
     attribution_spec?: any[]
+    /** Ad transparency — Meta's DSA advertiser/payer, publicly visible in the Ad Library. */
+    dsa_beneficiary?: string
+    dsa_payor?: string
   },
   opts?: { isManual?: boolean }
 ): Promise<{ id: string }> {
@@ -1180,6 +1183,8 @@ export async function createAdSet(
   if (params.destination_type) body.destination_type = params.destination_type
   if (params.promoted_object) body.promoted_object = JSON.stringify(params.promoted_object)
   if (params.attribution_spec) body.attribution_spec = JSON.stringify(params.attribution_spec)
+  if (params.dsa_beneficiary) body.dsa_beneficiary = params.dsa_beneficiary
+  if (params.dsa_payor) body.dsa_payor = params.dsa_payor
 
   const res = await secureMetaFetch(`${GRAPH_API_BASE}/${adAccountId}/adsets`, {
     method: "POST",

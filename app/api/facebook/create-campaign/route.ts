@@ -4,6 +4,7 @@ import {
   createCampaign,
   copyAdSet,
   getAdAccountPages,
+  getBusinessManagers,
   getPageInstagramAccounts,
   getPixels,
   getVideoThumbnail,
@@ -16,6 +17,13 @@ import { createAdminClient } from "@/lib/supabase/admin"
 import { getOrgAdAccountInfo, normalizeAdAccountId } from "../_utils"
 import { wallClockToUtcIso } from "@/lib/timezone"
 import { invalidateMetaReadCacheAfterWrite } from "../_db-cache"
+import {
+  adSetCountError,
+  buildAttributionSpec,
+  buildTargeting,
+  PUBLISHER_PLATFORMS,
+  type PublisherPlatform,
+} from "@/lib/create-campaign-targeting"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -58,6 +66,9 @@ const ZERO_DECIMAL_CURRENCIES = new Set([
   "XPF",
 ])
 
+/** Ad transparency — Meta's `dsa_beneficiary` / `dsa_payor`, publicly visible in the Ad Library. */
+type DsaEntity = { type: "page" | "business"; id: string } | null
+
 interface CreateCampaignState {
   campaignName: string
   objective: CampaignObjective
@@ -72,6 +83,7 @@ interface CreateCampaignState {
   costPerResultGoal: string
   attributionClickDays: "1" | "7"
   attributionViewDays: "0" | "1"
+  attributionEngagedViewDays: "0" | "1"
   dailyBudget: string
   scheduleStart: string
   scheduleEnd: string
@@ -80,6 +92,14 @@ interface CreateCampaignState {
   ageMin: number
   ageMax: number
   gender: Gender
+  // Placement + audience + DSA controls. `AdSetFormFields` has always collected these in
+  // mode="create"; until 12 Aug 2026 this route referenced none of them and Meta silently
+  // received its defaults (TD-38).
+  placementMode: "advantage" | "manual"
+  publisherPlatforms: PublisherPlatform[]
+  targetingExpansion: boolean
+  advertiser: DsaEntity
+  payer: DsaEntity
   adName: string
   pageId: string
   instagramId: string
@@ -181,6 +201,16 @@ function parseOptionalDateInTimeZone(value: string, label: string, timeZone: str
   return iso
 }
 
+/** Ad transparency picker sends an allowed Meta entity reference; display names are resolved server-side. */
+function parseDsaEntity(value: unknown, label: string): DsaEntity {
+  if (!isRecord(value)) return null
+  const type = asString(value.type)
+  if (type !== "page" && type !== "business") return null
+  const id = asString(value.id).trim()
+  if (!id) fail(400, `${label} must have an id`)
+  return { type, id }
+}
+
 function parseState(rawState: unknown): CreateCampaignState {
   if (!isRecord(rawState)) fail(400, "Missing campaign state")
 
@@ -210,6 +240,25 @@ function parseState(rawState: unknown): CreateCampaignState {
   }
   const attributionClickDays = rawState.attributionClickDays === "1" ? "1" : "7"
   const attributionViewDays = rawState.attributionViewDays === "1" ? "1" : "0"
+  const attributionEngagedViewDays = rawState.attributionEngagedViewDays === "1" ? "1" : "0"
+
+  const placementMode = rawState.placementMode === "manual" ? "manual" : "advantage"
+  const rawPublisherPlatforms = Array.isArray(rawState.publisherPlatforms) ? rawState.publisherPlatforms : []
+  const publisherPlatforms = rawPublisherPlatforms.filter((v): v is PublisherPlatform =>
+    typeof v === "string" && (PUBLISHER_PLATFORMS as string[]).includes(v)
+  )
+  if (publisherPlatforms.length !== rawPublisherPlatforms.length || new Set(publisherPlatforms).size !== publisherPlatforms.length) {
+    fail(400, "Publisher platforms contain an unsupported or duplicate value")
+  }
+  if (placementMode === "manual" && publisherPlatforms.length === 0) {
+    fail(400, "Manual placements need at least one platform")
+  }
+
+  for (const field of ["customAudiences", "excludedCustomAudiences", "detailedTargeting"] as const) {
+    if (Array.isArray(rawState[field]) && rawState[field].length > 0) {
+      fail(400, `${field} is not supported in Create Campaign yet`)
+    }
+  }
 
   const specialAdCategories = Array.isArray(rawState.specialAdCategories)
     ? rawState.specialAdCategories.filter((v): v is SpecialAdCategory =>
@@ -236,6 +285,7 @@ function parseState(rawState: unknown): CreateCampaignState {
     costPerResultGoal: asString(rawState.costPerResultGoal),
     attributionClickDays,
     attributionViewDays,
+    attributionEngagedViewDays,
     dailyBudget: asString(rawState.dailyBudget),
     scheduleStart: asString(rawState.scheduleStart),
     scheduleEnd: asString(rawState.scheduleEnd),
@@ -244,6 +294,11 @@ function parseState(rawState: unknown): CreateCampaignState {
     ageMin: typeof rawState.ageMin === "number" ? rawState.ageMin : 18,
     ageMax: typeof rawState.ageMax === "number" ? rawState.ageMax : 65,
     gender,
+    placementMode,
+    publisherPlatforms,
+    targetingExpansion: rawState.targetingExpansion !== false,
+    advertiser: parseDsaEntity(rawState.advertiser, "Advertiser"),
+    payer: parseDsaEntity(rawState.payer, "Payer"),
     adName: asString(rawState.adName),
     pageId: asString(rawState.pageId),
     instagramId: asString(rawState.instagramId),
@@ -274,6 +329,9 @@ function parseState(rawState: unknown): CreateCampaignState {
   if (!state.headline) fail(400, "Headline is required")
   if (!state.primaryText) fail(400, "Primary text is required")
   if (state.locations.length === 0) fail(400, "At least one country is required")
+  // Refuse an over-cap batch before the first Meta call (TD-40).
+  const capError = adSetCountError(state.oneAdPerAdset, state.creativeIds.length)
+  if (capError) fail(400, capError)
   if (state.ageMin < 18 || state.ageMax < state.ageMin || state.ageMax > 65) {
     fail(400, "Age range must be between 18 and 65+")
   }
@@ -317,24 +375,6 @@ function resolveDelivery(state: CreateCampaignState): {
 
   fail(400, "Unsupported objective")
 } 
-
-function buildTargeting(state: CreateCampaignState) {
-  const targeting: {
-    geo_locations: { countries: string[] }
-    age_min: number
-    age_max: number
-    genders?: number[]
-  } = {
-    geo_locations: { countries: state.locations },
-    age_min: state.ageMin,
-    age_max: state.ageMax,
-  }
-
-  if (state.gender === "MALE") targeting.genders = [1]
-  if (state.gender === "FEMALE") targeting.genders = [2]
-
-  return targeting
-}
 
 function mediaFileName(mediaUrl: string, mediaType: MediaType) {
   try {
@@ -506,6 +546,37 @@ async function assertIdentityAllowed(
     const igAccounts = await getPageInstagramAccounts(selectedPage.id, selectedPage.access_token)
     const igAllowed = igAccounts.some((account) => account.id === state.instagramId)
     if (!igAllowed) fail(400, "Selected Instagram account is not connected to the selected Page")
+  }
+
+  return pages
+}
+
+async function resolveDsaNames(
+  state: CreateCampaignState,
+  adAccountId: string,
+  token: string
+) {
+  const selected = [state.advertiser, state.payer].filter((entity): entity is NonNullable<DsaEntity> => Boolean(entity))
+  if (selected.length === 0) return { advertiserName: undefined, payerName: undefined }
+
+  const pages = selected.some((entity) => entity.type === "page")
+    ? await getAdAccountPages(adAccountId, token)
+    : []
+  const businesses = selected.some((entity) => entity.type === "business")
+    ? await getBusinessManagers(token)
+    : []
+  const resolve = (entity: DsaEntity, label: string) => {
+    if (!entity) return undefined
+    const match = entity.type === "page"
+      ? pages.find((page) => page.id === entity.id)
+      : businesses.find((business) => business.id === entity.id)
+    if (!match) fail(400, `Selected ${label} is not available for this ad account connection`)
+    return match.name
+  }
+
+  return {
+    advertiserName: resolve(state.advertiser, "Advertiser"),
+    payerName: resolve(state.payer, "Payer"),
   }
 }
 
@@ -712,6 +783,13 @@ export async function POST(request: NextRequest) {
     const account = await assertAdAccountAllowed(ctx.orgId, adAccountId, token)
     const currency = account.currency || "USD"
     await assertIdentityAllowed(adAccountId, token, state)
+    const dsaReadConnection = state.advertiser || state.payer
+      ? await getConnectionForAdAccount(ctx.orgId, rawAdAccountId, "read")
+      : null
+    if ((state.advertiser || state.payer) && !dsaReadConnection) {
+      fail(400, "No Facebook read connection found for Ad transparency")
+    }
+    const dsa = await resolveDsaNames(state, adAccountId, dsaReadConnection?.access_token || token)
     await assertPixelAllowed(adAccountId, token, state)
 
     const delivery = resolveDelivery(state)
@@ -724,10 +802,7 @@ export async function POST(request: NextRequest) {
     const costPerResultGoal = state.costPerResultGoal
       ? budgetMinorUnits(state.costPerResultGoal, "Cost per result goal", currency)
       : undefined
-    const attributionSpec = [
-      { event_type: "CLICK_THROUGH", window_days: Number(state.attributionClickDays) },
-      ...(state.attributionViewDays === "1" ? [{ event_type: "VIEW_THROUGH", window_days: 1 }] : []),
-    ]
+    const attributionSpec = buildAttributionSpec(state)
 
     const accountTimeZone = account.timezoneName || "UTC"
     const useUtc = state.scheduleTimeBasis === "utc"
@@ -765,6 +840,10 @@ export async function POST(request: NextRequest) {
       destination_type: "WEBSITE",
       promoted_object: delivery.promotedObject,
       attribution_spec: attributionSpec,
+      // Ad transparency. Publicly visible in the Meta Ad Library; omitted when unset so the
+      // account-level default keeps applying.
+      dsa_beneficiary: dsa.advertiserName,
+      dsa_payor: dsa.payerName,
     }, tokenOpts)
     await patchAdSetEndTime(adSet.id, token, endTime)
 

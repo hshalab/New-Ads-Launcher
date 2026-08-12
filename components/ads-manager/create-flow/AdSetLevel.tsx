@@ -1,6 +1,6 @@
 "use client"
 
-import { CampaignFormState, PixelOption } from "./types"
+import { AdvertiserEntity, CampaignFormState, PixelOption } from "./types"
 import { AdSetFormFields } from "./AdSetFormFields"
 
 interface Props {
@@ -11,9 +11,10 @@ interface Props {
   currency: string
   timezoneName?: string
   invalidFields: Set<string>
+  advertisers: AdvertiserEntity[]
 }
 
-export function AdSetLevel({ state, update, pixels, pixelsLoading, currency, timezoneName, invalidFields }: Props) {
+export function AdSetLevel({ state, update, pixels, pixelsLoading, currency, timezoneName, invalidFields, advertisers }: Props) {
   return (
     <div className="mx-auto max-w-4xl space-y-6 px-6 py-8 pb-20">
       <div className="flex items-center gap-2">
@@ -29,6 +30,7 @@ export function AdSetLevel({ state, update, pixels, pixelsLoading, currency, tim
         currency={currency}
         timezoneName={timezoneName}
         invalidFields={invalidFields}
+        advertisers={advertisers}
       />
     </div>
   )

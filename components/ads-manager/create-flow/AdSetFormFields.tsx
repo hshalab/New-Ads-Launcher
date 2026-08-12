@@ -360,9 +360,17 @@ export function AdSetFormFields({
           <label className="text-xs font-medium uppercase tracking-wider text-[#65676b]">
             Engaged-view
             <select
-              value={value.attributionEngagedViewDays}
+              value={value.mediaType === "video" && value.performanceGoal === "OFFSITE_CONVERSIONS" ? value.attributionEngagedViewDays : "0"}
+              disabled={value.mediaType !== "video" || value.performanceGoal !== "OFFSITE_CONVERSIONS"}
               onChange={(e) => onChange({ attributionEngagedViewDays: e.target.value as "0" | "1" })}
-              className="mt-1.5 h-9 w-full rounded border border-[#ccd0d5] bg-white px-3 text-xs font-normal text-[#1c2b33] outline-none focus:border-[#1877f2] dark:border-gray-700 dark:bg-background dark:text-gray-200"
+              title={
+                value.mediaType !== "video"
+                  ? "Engaged-view attribution is available for video ads only"
+                  : value.performanceGoal !== "OFFSITE_CONVERSIONS"
+                    ? "Engaged-view attribution is not enabled for this performance goal"
+                    : undefined
+              }
+              className="mt-1.5 h-9 w-full rounded border border-[#ccd0d5] bg-white px-3 text-xs font-normal text-[#1c2b33] outline-none focus:border-[#1877f2] disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400 dark:border-gray-700 dark:bg-background dark:text-gray-200 dark:disabled:bg-slate-900 dark:disabled:text-slate-500"
             >
               <option value="0">None</option>
               <option value="1">1 day</option>
@@ -388,7 +396,7 @@ export function AdSetFormFields({
           <label className="mb-1.5 block text-xs font-semibold text-[#1c2b33] dark:text-gray-200">
             Custom Audiences
           </label>
-          <div className="mb-2 flex flex-wrap gap-2">
+          {mode === "edit" && <div className="mb-2 flex flex-wrap gap-2">
             {value.customAudiences.map((ca) => (
               <span
                 key={ca.id}
@@ -407,11 +415,13 @@ export function AdSetFormFields({
                 </button>
               </span>
             ))}
-          </div>
+          </div>}
           <input
             type="text"
-            placeholder="Search existing audiences... (TODO: backend wiring)"
-            className="h-9 w-full rounded border border-[#ccd0d5] bg-white px-3 text-xs outline-none focus:border-[#1877f2] dark:border-gray-700 dark:bg-background"
+            disabled
+            title="Custom audience search is not built yet (BL-62)"
+            placeholder="Custom audience search — not available yet"
+            className="h-9 w-full cursor-not-allowed rounded border border-[#ccd0d5] bg-slate-50 px-3 text-xs text-slate-400 outline-none dark:border-gray-700 dark:bg-slate-900 dark:text-slate-500"
           />
         </div>
 
@@ -523,7 +533,7 @@ export function AdSetFormFields({
           <label className="mb-1.5 block text-xs font-semibold text-[#1c2b33] dark:text-gray-200">
             Detailed Targeting
           </label>
-          <div className="mb-2 flex flex-wrap gap-2">
+          {mode === "edit" && <div className="mb-2 flex flex-wrap gap-2">
             {value.detailedTargeting.map((dt) => (
               <span
                 key={dt.id}
@@ -542,11 +552,13 @@ export function AdSetFormFields({
                 </button>
               </span>
             ))}
-          </div>
+          </div>}
           <input
             type="text"
-            placeholder="Add demographics, interests or behaviors... (TODO: backend wiring)"
-            className="h-9 w-full rounded border border-[#ccd0d5] bg-white px-3 text-xs outline-none focus:border-[#1877f2] dark:border-gray-700 dark:bg-background"
+            disabled
+            title="Detailed targeting search is not built yet (BL-62)"
+            placeholder="Demographics, interests, behaviors — not available yet"
+            className="h-9 w-full cursor-not-allowed rounded border border-[#ccd0d5] bg-slate-50 px-3 text-xs text-slate-400 outline-none dark:border-gray-700 dark:bg-slate-900 dark:text-slate-500"
           />
 
           <div className="mt-3 flex items-start gap-2 rounded border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-muted/50">

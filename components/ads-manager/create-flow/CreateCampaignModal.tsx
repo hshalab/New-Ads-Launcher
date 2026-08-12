@@ -20,6 +20,7 @@ import {
   CampaignFormState,
   CreativeAssetOption,
   defaultCampaignState,
+  AdvertiserEntity,
   FacebookPageOption,
   InstagramOption,
   PixelOption,
@@ -27,6 +28,10 @@ import {
 
 type Step = "campaign" | "adset" | "ad"
 type PublishStatus = "idle" | "publishing" | "success" | "error"
+
+function advertiserStillAvailable(entity: AdvertiserEntity | null, options: AdvertiserEntity[]) {
+  return Boolean(entity && options.some((option) => option?.id === entity.id && option.type === entity.type))
+}
 
 interface Props {
   open: boolean
@@ -167,6 +172,7 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
   const [instagramLoading, setInstagramLoading] = useState(false)
   const [pixels, setPixels] = useState<PixelOption[]>([])
   const [pixelsLoading, setPixelsLoading] = useState(false)
+  const [advertisers, setAdvertisers] = useState<AdvertiserEntity[]>([])
   const [isUploadingMedia, setIsUploadingMedia] = useState(false)
   const [mediaUploadError, setMediaUploadError] = useState("")
   const loadedAccountIdRef = useRef("")
@@ -321,6 +327,7 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
       setPages([])
       setPixels([])
       setInstagramAccounts([])
+      setAdvertisers([])
       setPagesLoading(false)
       setPixelsLoading(false)
       setLoadError(accountsLoading ? "" : "Select an ad account first.")
@@ -342,6 +349,7 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
     setPages([])
     setPixels([])
     setInstagramAccounts([])
+    setAdvertisers([])
     setPagesLoading(true)
     setPixelsLoading(true)
 
@@ -359,27 +367,40 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
 
     const load = async () => {
       try {
-        const [pagesRes, pixelsRes] = await Promise.all([
+        const [pagesRes, pixelsRes, advertisersRes] = await Promise.all([
           fetch(`/api/facebook/pages?ad_account_id=${encodeURIComponent(selectedAccountId)}`),
           fetch(`/api/facebook/pixels?ad_account_id=${encodeURIComponent(selectedAccountId)}`),
+          fetch(`/api/facebook/adset-advertisers?ad_account_id=${encodeURIComponent(selectedAccountId)}`),
         ])
         const pagesData = await pagesRes.json()
         const pixelsData = await pixelsRes.json()
+        const advertisersData = await advertisersRes.json()
 
         if (!pagesRes.ok) throw new Error(pagesData.error || "Failed to load Pages")
         if (!pixelsRes.ok) throw new Error(pixelsData.error || "Failed to load Pixels")
+        if (!advertisersRes.ok) throw new Error(advertisersData.error || "Failed to load advertisers")
 
         if (cancelled) return
         const nextPages = (pagesData.pages || []) as FacebookPageOption[]
         const nextPixels = (pixelsData.pixels || []) as PixelOption[]
         setPages(nextPages)
         setPixels(nextPixels)
+        const nextAdvertisers = ((advertisersData.advertisers || []) as AdvertiserEntity[]).filter(
+          (entity): entity is NonNullable<AdvertiserEntity> => Boolean(entity)
+        )
+        setAdvertisers(nextAdvertisers)
         loadedAccountIdRef.current = selectedAccountId
         setState((previous) => ({
           ...previous,
           pageId: nextPages.some((page) => page.id === previous.pageId) ? previous.pageId : "",
           instagramId: nextPages.some((page) => page.id === previous.pageId) ? previous.instagramId : "",
           pixelId: nextPixels.some((pixel) => pixel.id === previous.pixelId) ? previous.pixelId : "",
+          advertiser: advertiserStillAvailable(previous.advertiser, nextAdvertisers)
+            ? previous.advertiser
+            : null,
+          payer: advertiserStillAvailable(previous.payer, nextAdvertisers)
+            ? previous.payer
+            : null,
           creativeId: previous.creativeId,
           creativeFileName: previous.creativeFileName,
           creativePreviewUrl: previous.creativePreviewUrl,
@@ -388,6 +409,7 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
         if (!cancelled) {
           setPages([])
           setPixels([])
+          setAdvertisers([])
           setLoadError(error instanceof Error ? error.message : "Failed to load account data")
         }
       } finally {
@@ -649,6 +671,7 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
                       currency={currency}
                       timezoneName={selectedAccount?.timezone_name}
                       invalidFields={invalidFields}
+                      advertisers={advertisers}
                     />
                   )}
                   {activeStep === "ad" && (
