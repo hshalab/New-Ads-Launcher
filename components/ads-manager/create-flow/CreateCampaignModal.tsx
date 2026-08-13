@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import {
   IconAlertCircle,
   IconCheck,
+  IconChevronRight,
   IconFolder,
   IconLayoutGrid,
   IconLoader2,
@@ -12,10 +13,12 @@ import {
 } from "@tabler/icons-react"
 import { Button } from "@/components/ui/button"
 import { useAdAccount } from "@/lib/ad-account-context"
+import { normalizeOdaxSelection } from "@/lib/odax-matrix"
 import { cn } from "@/lib/utils"
 import { AdLevel } from "./AdLevel"
 import { AdSetLevel } from "./AdSetLevel"
 import { CampaignLevel } from "./CampaignLevel"
+import { CreateEntryGate, EntryGateResult, SetupMode } from "./CreateEntryGate"
 import {
   CampaignFormState,
   CreativeAssetOption,
@@ -33,10 +36,23 @@ function advertiserStillAvailable(entity: AdvertiserEntity | null, options: Adve
   return Boolean(entity && options.some((option) => option?.id === entity.id && option.type === entity.type))
 }
 
+/**
+ * What the publish produced, handed back so the caller can point at it. The table refetches from
+ * Meta after a publish and the new rows land somewhere in a list of hundreds — without the ids
+ * there is nothing to point at, and "it worked" is the only feedback the user gets.
+ */
+export interface PublishResult {
+  campaignId?: string
+  adSetIds: string[]
+  adIds: string[]
+  /** true = the campaign was already running and we only added to it (the "New ad set or ad" scope). */
+  attached: boolean
+}
+
 interface Props {
   open: boolean
   onClose: () => void
-  onSuccess?: () => void
+  onSuccess?: (result: PublishResult) => void
   initialState?: Partial<CampaignFormState>
 }
 
@@ -45,7 +61,11 @@ interface CreateCampaignResponse {
   error?: string
   campaignId?: string
   adSetId?: string
+  adSetIds?: string[]
+  attached?: boolean
   adId?: string
+  /** Multi-creative branch returns one entry per ad; the single-ad branch returns `adId`. */
+  createdAds?: Array<{ adId: string }>
   batchId?: string | null
 }
 
@@ -103,9 +123,14 @@ function getValidationIssues(
   currency: string
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = []
+  // Attaching to an existing campaign: its name and budget are already set in Meta, and this flow
+  // does not edit a running campaign. Asking for either would be asking for something we discard.
+  const attached = Boolean(state.existingCampaignId)
   if (!selectedAccountId) issues.push({ step: "campaign", field: "adAccount", message: "Select an ad account first." })
-  if (!state.campaignName.trim()) issues.push({ step: "campaign", field: "campaignName", message: "Campaign name is required." })
-  if (state.advantageCampaignBudget && !positiveMoney(state.campaignBudget, currency)) {
+  if (!attached && !state.campaignName.trim()) {
+    issues.push({ step: "campaign", field: "campaignName", message: "Campaign name is required." })
+  }
+  if (!attached && state.advantageCampaignBudget && !positiveMoney(state.campaignBudget, currency)) {
     issues.push({ step: "campaign", field: "campaignBudget", message: `Budget must be a valid ${currency} amount greater than 0.` })
   }
 
@@ -120,8 +145,18 @@ function getValidationIssues(
   if (!state.advantageCampaignBudget && !positiveMoney(state.dailyBudget, currency)) {
     issues.push({ step: "adset", field: "dailyBudget", message: `Budget must be a valid ${currency} amount greater than 0.` })
   }
-  if (state.costPerResultGoal && !positiveMoney(state.costPerResultGoal, currency)) {
-    issues.push({ step: "adset", field: "costPerResultGoal", message: `Cost goal must be a valid ${currency} amount greater than 0.` })
+  // The cap value belongs to COST_CAP / Bid cap only. Required when one of them is active, and the
+  // step it is reported on follows whichever level owns the strategy.
+  const capStrategy =
+    state.campaignBidStrategy === "COST_CAP" || state.campaignBidStrategy === "LOWEST_COST_WITH_BID_CAP"
+  const bidStep: ValidationIssue["step"] =
+    !attached && state.advantageCampaignBudget ? "campaign" : "adset"
+  if (capStrategy && !positiveMoney(state.costPerResultGoal, currency)) {
+    issues.push({
+      step: bidStep,
+      field: "costPerResultGoal",
+      message: `Bid amount must be a valid ${currency} amount greater than 0.`,
+    })
   }
   if (state.scheduleStart && state.scheduleEnd && new Date(state.scheduleEnd) <= new Date(state.scheduleStart)) {
     issues.push({ step: "adset", field: "scheduleEnd", message: "End date must be after start date." })
@@ -156,6 +191,10 @@ function validateState(
 }
 
 export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: Props) {
+  // The entry gates run before the editor exists — objective locks the ODAX chain, so it cannot be
+  // a field halfway down the campaign form (create-campaign-flow.html §1).
+  const [phase, setPhase] = useState<"gate" | "editor">("gate")
+  const [setupMode, setSetupMode] = useState<SetupMode>("recommended")
   const [activeStep, setActiveStep] = useState<Step>("campaign")
   const [state, setState] = useState<CampaignFormState>(defaultCampaignState)
   const [isPublishing, setIsPublishing] = useState(false)
@@ -181,7 +220,17 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
   const currency = (selectedAccount?.currency || "USD").toUpperCase()
 
   const update = (updates: Partial<CampaignFormState>) => {
-    setState((previous) => ({ ...previous, ...updates }))
+    setState((previous) => {
+      const next = { ...previous, ...updates }
+      // Any change to a link of the ODAX chain re-derives the links below it, so the form can
+      // never hold a combination `buildDeliveryFields` would reject on the server.
+      const touchesOdax =
+        "objective" in updates ||
+        "conversionLocation" in updates ||
+        "engagementType" in updates ||
+        "performanceGoal" in updates
+      return touchesOdax ? { ...next, ...normalizeOdaxSelection(next) } : next
+    })
     setFormError("")
     setMediaUploadError("")
     setCreatedIds(null)
@@ -272,7 +321,7 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
       const creative = data.creative as CreativeAssetOption
       applyUploadedCreative(creative)
 
-      if (creative.media_type === "video" && !creative.fb_thumbnail_url && !!(creative as any).fb_video_id) {
+      if (creative.media_type === "video" && !creative.fb_thumbnail_url && !!creative.fb_video_id) {
         void refreshUploadedVideoPreview(creative.id)
       }
       return creative
@@ -311,6 +360,7 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
       headlineVariations: [...(initialState?.headlineVariations || defaultCampaignState.headlineVariations)],
       descriptionVariations: [...(initialState?.descriptionVariations || defaultCampaignState.descriptionVariations)],
     })
+    setPhase("gate")
     setActiveStep("campaign")
     setFormError("")
     setMediaUploadError("")
@@ -467,11 +517,6 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
     }
   }, [open, selectedAccountId, state.pageId])
 
-  const activeTitle = useMemo(() => {
-    if (activeStep === "campaign") return state.campaignName || "New Campaign"
-    if (activeStep === "adset") return state.adSetName || "New Ad Set"
-    return state.adName || "New Ad"
-  }, [activeStep, state.adName, state.adSetName, state.campaignName])
   const invalidFields = useMemo(() => {
     if (!showValidation) return new Set<string>()
     const issues = getValidationIssues(state, selectedAccountId, currency)
@@ -520,8 +565,17 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
 
       setCreatedIds(data)
       setPublishStatus("success")
-      setPublishMessage("Campaign published successfully.")
-      onSuccess?.()
+      setPublishMessage(data.attached ? "Ad set published successfully." : "Campaign published successfully.")
+      onSuccess?.({
+        campaignId: data.campaignId,
+        adSetIds: data.adSetIds?.length ? data.adSetIds : data.adSetId ? [data.adSetId] : [],
+        adIds: data.createdAds?.length
+          ? data.createdAds.map((item) => item.adId).filter(Boolean)
+          : data.adId
+            ? [data.adId]
+            : [],
+        attached: Boolean(data.attached),
+      })
       setState(defaultCampaignState)
       setTimeout(() => setPublishStatus("idle"), 3000)
     } catch (error) {
@@ -552,11 +606,65 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
     return <CampaignPublishToast status={publishStatus} message={publishMessage} />
   }
 
+  // Gate → editor. The objective normalizes the whole ODAX chain on the way through, so the editor
+  // never opens on a combination `lib/odax-matrix.ts` cannot build.
+  const enterEditor = ({ objective, setupMode: chosenMode, scope, existingCampaign }: EntryGateResult) => {
+    setSetupMode(chosenMode)
+    update({
+      ...normalizeOdaxSelection({
+        objective,
+        conversionLocation: state.conversionLocation,
+        engagementType: state.engagementType,
+        performanceGoal: state.performanceGoal,
+      }),
+      // The setup-mode gate has to actually change something, or it is a question with one answer.
+      // Recommended = the three Advantage switches on (which is also the form's default state);
+      // Manual = all three off, so budget lives on the ad set and targeting/placements are hand-set.
+      ...(chosenMode === "recommended"
+        ? { placementMode: "advantage" as const, targetingExpansion: true, advantageCampaignBudget: true }
+        : { placementMode: "manual" as const, targetingExpansion: false, advantageCampaignBudget: false }),
+      // Attach branch: the budget switch is not a preference here, it is a fact about the campaign.
+      // A CBO campaign rejects an ad set budget; an ABO campaign needs one.
+      ...(scope === "existing" && existingCampaign
+        ? {
+            existingCampaignId: existingCampaign.id,
+            existingCampaignName: existingCampaign.name,
+            campaignName: existingCampaign.name,
+            advantageCampaignBudget: existingCampaign.hasCampaignBudget,
+          }
+        : { existingCampaignId: "", existingCampaignName: "" }),
+    })
+    // Nothing on the campaign step is editable when attaching, so opening there would be a dead end.
+    setActiveStep(scope === "existing" ? "adset" : "campaign")
+    setPhase("editor")
+  }
+
+  if (phase === "gate") {
+    return (
+      <>
+        <CampaignPublishToast status={publishStatus} message={publishMessage} />
+        <CreateEntryGate
+          open
+          objective={state.objective}
+          setupMode={setupMode}
+          accountId={selectedAccountId}
+          onCancel={onClose}
+          onContinue={enterEditor}
+        />
+      </>
+    )
+  }
+
   return (
     <>
       <CampaignPublishToast status={publishStatus} message={publishMessage} />
-      <div className="fixed inset-0 z-50 flex justify-center bg-black/40">
-      <div className="m-4 flex w-full max-w-[1250px] animate-in flex-col overflow-hidden rounded-lg border border-[#e4e6eb] bg-[#f5f6f7] shadow-2xl duration-200 fade-in zoom-in-95 dark:border-gray-800 dark:bg-background">
+      {/* z-60, not z-50: the global feedback bubble is `fixed bottom-6 right-6 z-50` and mounts
+          after this modal, so at equal z it paints over the footer's Publish/Next button and makes
+          it unclickable in its bottom-right corner. */}
+      <div className="fixed inset-0 z-[60] flex justify-center">
+      {/* Full-viewport, not a floating card: Ads Manager's create flow takes over the screen, and
+          the ad set step needs the width for a 2-column form + right rail. */}
+      <div className="flex h-full w-full animate-in flex-col overflow-hidden bg-[#f0f2f5] duration-200 fade-in dark:bg-background">
         <div className="flex h-14 shrink-0 items-center justify-between border-b border-[#e4e6eb] bg-white px-4 dark:border-gray-800 dark:bg-card">
           <div className="flex min-w-0 items-center gap-3">
             <button
@@ -569,27 +677,47 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
             </button>
             <div className="min-w-0">
               <h2 className="truncate text-sm font-semibold text-[#1c2b33] dark:text-gray-100">
-                Create a New Campaign
+                {state.existingCampaignId ? "New ad set or ad" : "Create a New Campaign"}
               </h2>
-              <p className="truncate text-xs text-[#65676b]">
-                {bootLoading
-                  ? accountsLoading
-                    ? "Loading ad accounts…"
-                    : "Loading Facebook pages…"
-                  : activeTitle}
-              </p>
+              {bootLoading ? (
+                <p className="truncate text-xs text-[#65676b]">
+                  {accountsLoading ? "Loading ad accounts…" : "Loading Facebook pages…"}
+                </p>
+              ) : (
+                // Breadcrumb mirrors the left rail's position (PRD §6.2). Clicking a crumb is the
+                // same jump as clicking the tree node — state is flat, so nothing is lost.
+                <nav className="flex min-w-0 items-center gap-1 text-xs text-[#65676b]">
+                  {(
+                    [
+                      { step: "campaign" as const, icon: IconFolder, label: state.campaignName || "New Campaign" },
+                      { step: "adset" as const, icon: IconTable, label: state.adSetName || "New Ad Set" },
+                      { step: "ad" as const, icon: IconLayoutGrid, label: state.adName || "New Ad" },
+                    ]
+                  ).map((crumb, index) => (
+                    <span key={crumb.step} className="flex min-w-0 items-center gap-1">
+                      {index > 0 && <IconChevronRight className="size-3 shrink-0 text-[#a0a4ab]" />}
+                      <button
+                        type="button"
+                        onClick={() => setActiveStep(crumb.step)}
+                        className={cn(
+                          "flex min-w-0 items-center gap-1 rounded px-1 py-0.5 transition-colors hover:bg-black/5",
+                          activeStep === crumb.step && "font-semibold text-[#1c2b33] dark:text-gray-100"
+                        )}
+                      >
+                        <crumb.icon className="size-3 shrink-0" />
+                        <span className="truncate">{crumb.label}</span>
+                      </button>
+                    </span>
+                  ))}
+                </nav>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onClose}
-              disabled={isPublishing}
-              className="h-8 border-[#ccd0d5] text-xs font-semibold text-[#4b4f56]"
-            >
-              Close
-            </Button>
+            <span className="rounded-full bg-[#f0f2f5] px-2.5 py-1 text-[11px] font-medium text-[#65676b] dark:bg-muted">
+              {/* Honest label: nothing is persisted until Publish — drafts are BL-59. */}
+              Not saved yet
+            </span>
           </div>
         </div>
 
@@ -657,10 +785,17 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
                 </div>
               </div>
 
-              <div className="flex min-w-0 flex-1 flex-col bg-white dark:bg-card">
+              <div className="flex min-w-0 flex-1 flex-col bg-[#f0f2f5] dark:bg-background">
                 <div className="flex-1 overflow-y-auto">
                   {activeStep === "campaign" && (
-                  <CampaignLevel state={state} update={update} currency={currency} invalidFields={invalidFields} />
+                  <CampaignLevel
+                    state={state}
+                    update={update}
+                    currency={currency}
+                    invalidFields={invalidFields}
+                    setupMode={setupMode}
+                    onChangeObjective={() => setPhase("gate")}
+                  />
                   )}
                   {activeStep === "adset" && (
                     <AdSetLevel
@@ -672,6 +807,7 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
                       timezoneName={selectedAccount?.timezone_name}
                       invalidFields={invalidFields}
                       advertisers={advertisers}
+                      accountId={selectedAccountId}
                     />
                   )}
                   {activeStep === "ad" && (
@@ -692,21 +828,54 @@ export function CreateCampaignModal({ open, onClose, onSuccess, initialState }: 
                     />
                   )}
                 </div>
-                <div className="flex shrink-0 justify-end border-t border-[#e4e6eb] px-6 py-3 dark:border-gray-800">
-                  {activeStep === "ad" ? (
-                    <Button
-                      onClick={handlePublish}
-                      disabled={publishDisabled}
-                      className="bg-[#31a24c] px-5 font-semibold text-white hover:bg-[#2b9244]"
-                    >
-                      Publish
-                    </Button>
-                  ) : (
-                    <Button onClick={handleSaveAndContinue} className="bg-[#1877f2] px-5 font-semibold text-white hover:bg-[#166fe5]">
-                      Save and continue
-                    </Button>
-                  )}
-                </div>
+              </div>
+            </div>
+
+            {/* Footer spans the whole editor, below both the tree and the form — PRD §6.6.
+                Close sits left, navigation right, the way Ads Manager arranges it. */}
+            <div className="flex shrink-0 items-center justify-between gap-4 border-t border-[#e4e6eb] bg-white px-4 py-3 dark:border-gray-800 dark:bg-card">
+              <Button
+                variant="outline"
+                onClick={onClose}
+                disabled={isPublishing}
+                className="h-9 border-[#ccd0d5] px-5 text-xs font-semibold text-[#4b4f56]"
+              >
+                Close
+              </Button>
+
+              <div className="flex min-w-0 items-center gap-3">
+                {activeStep === "ad" && (
+                  <p className="hidden max-w-md text-right text-[11px] leading-tight text-[#65676b] lg:block">
+                    By clicking Publish, you acknowledge that your use of Meta&apos;s ad tools is
+                    subject to our Terms and Conditions.
+                  </p>
+                )}
+                {activeStep !== "campaign" && (
+                  <Button
+                    variant="outline"
+                    onClick={() => setActiveStep(activeStep === "ad" ? "adset" : "campaign")}
+                    disabled={isPublishing}
+                    className="h-9 border-[#ccd0d5] px-5 text-xs font-semibold text-[#4b4f56]"
+                  >
+                    Back
+                  </Button>
+                )}
+                {activeStep === "ad" ? (
+                  <Button
+                    onClick={handlePublish}
+                    disabled={publishDisabled}
+                    className="h-9 bg-[#31a24c] px-5 font-semibold text-white hover:bg-[#2b9244]"
+                  >
+                    Publish
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={handleSaveAndContinue}
+                    className="h-9 bg-[#1877f2] px-5 font-semibold text-white hover:bg-[#166fe5]"
+                  >
+                    Next
+                  </Button>
+                )}
               </div>
             </div>
           </>
@@ -731,7 +900,7 @@ function CampaignPublishToast({
     <div
       role="status"
       aria-live="polite"
-      className="fixed bottom-5 left-5 z-[60] flex max-w-sm animate-in items-center gap-3 rounded-xl border bg-white px-4 py-3 shadow-xl slide-in-from-bottom-3 dark:bg-card"
+      className="fixed bottom-5 left-5 z-[70] flex max-w-sm animate-in items-center gap-3 rounded-xl border bg-white px-4 py-3 shadow-xl slide-in-from-bottom-3 dark:bg-card"
     >
       <Icon
         className={cn(

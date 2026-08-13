@@ -12,7 +12,6 @@ describe("Task 4 Create Campaign contract", () => {
 
     assert.match(campaign, /showSpecialCategories/)
     assert.match(campaign, /Advanced settings/)
-    assert.match(modal, /Save and continue/)
     assert.match(modal, /setActiveStep\("adset"\)/)
     assert.match(modal, /setActiveStep\("ad"\)/)
   })
@@ -35,16 +34,16 @@ describe("Task 4 Create Campaign contract", () => {
 
   it("wires proven Meta ad-set fields end to end", () => {
     const types = read("components/ads-manager/create-flow/types.ts")
-    const adSet = read("components/ads-manager/create-flow/AdSetLevel.tsx")
+    const adSetFields = read("components/ads-manager/create-flow/AdSetFormFields.tsx")
     const route = read("app/api/facebook/create-campaign/route.ts")
 
     for (const field of ["conversionEvent", "costPerResultGoal", "attributionClickDays", "attributionViewDays"]) {
       assert.match(types, new RegExp(field))
       assert.match(route, new RegExp(field))
     }
-    assert.match(adSet, /Conversion event/)
-    assert.match(adSet, /Cost per result goal/)
-    assert.match(adSet, /Attribution setting/)
+    assert.match(adSetFields, /Conversion event/)
+    assert.match(adSetFields, /Cost per result goal/)
+    assert.match(adSetFields, /Attribution setting/)
     assert.match(route, /bid_strategy: costPerResultGoal \? "COST_CAP"/)
     assert.match(route, /attribution_spec/)
   })

@@ -6,7 +6,8 @@ import {
   MissingViaError,
   requireRole,
 } from "@/lib/auth"
-import { getNodeTargeting, replaceAdCreative, updateNode } from "@/lib/facebook"
+import { getCampaignObjective, getNodeTargeting, replaceAdCreative, updateNode } from "@/lib/facebook"
+import { odaxRejectionForAdSet } from "@/lib/workspace-odax-guard"
 import { mergeEditorTargeting } from "@/lib/targeting-merge"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { invalidateMetaReadCacheAfterWrite } from "@/app/api/facebook/_db-cache"
@@ -27,8 +28,11 @@ type WorkspaceChange = {
     stop_time?: string
     end_time?: string
     optimization_goal?: string
+    /** Meta's conversion location for this ad set. Needed to resolve the ODAX row (TD-42). */
+    destination_type?: string
     bid_strategy?: string
     bid_amount?: string
+    bid_constraints?: { roas_average_floor?: number }
     attribution_spec?: unknown
     promoted_object?: unknown
     targeting?: unknown
@@ -97,6 +101,19 @@ export async function POST(request: NextRequest) {
     const failed = new Set<string>()
     const results: PublishResult[] = []
 
+    // One objective read per campaign per request, not per ad set — a bulk edit of 10 ad sets in
+    // one campaign is a hot path (TD-42 impact trace, plane 6 · rate limiting).
+    const objectiveByCampaign = new Map<string, Promise<string | undefined>>()
+    const campaignObjective = (campaignId: string) => {
+      const cached = objectiveByCampaign.get(campaignId)
+      if (cached) return cached
+      const pending = getCampaignObjective(campaignId, connection.access_token, {
+        isManual: isManual(connection),
+      })
+      objectiveByCampaign.set(campaignId, pending)
+      return pending
+    }
+
     for (const change of ordered) {
       const parentFailed = change.level === "adset"
         ? Boolean(change.node.campaign_id && failed.has(change.node.campaign_id))
@@ -118,6 +135,19 @@ export async function POST(request: NextRequest) {
       }
 
       try {
+        // TD-42: the editor offered every performance goal regardless of objective, so an edit
+        // could carry a combination Meta refuses. Refuse it here, before the write, with a message
+        // that names what would have worked. The guard degrades open on every unknown — a false
+        // rejection would block real edits for everyone at once, and there are no feature flags.
+        if (change.level === "adset" && change.node.optimization_goal && change.node.campaign_id) {
+          const rejection = odaxRejectionForAdSet({
+            optimizationGoal: change.node.optimization_goal,
+            objective: await campaignObjective(change.node.campaign_id),
+            destinationType: change.node.destination_type,
+          })
+          if (rejection) throw new Error(rejection)
+        }
+
         if (change.level === "ad" && change.node.creative_edit) {
           let imageHash = change.node.image_hash
           let videoId = change.node.video_id
@@ -196,7 +226,13 @@ export async function POST(request: NextRequest) {
           end_time: change.level === "campaign" ? change.node.stop_time : change.node.end_time,
           optimization_goal: change.node.optimization_goal,
           bid_strategy: change.node.bid_strategy,
-          bid_amount: moneyFromMinor(change.node.bid_amount),
+          // bid_amount and bid_constraints are ad-set-only fields in Meta's model — a campaign takes
+          // bid_strategy alone. ROAS never travels with a bid_amount.
+          bid_amount:
+            change.level === "adset" && change.node.bid_strategy !== "LOWEST_COST_WITH_MIN_ROAS"
+              ? moneyFromMinor(change.node.bid_amount)
+              : undefined,
+          bid_constraints: change.level === "adset" ? change.node.bid_constraints : undefined,
           attribution_spec: change.node.attribution_spec,
           promoted_object: change.node.promoted_object,
           targeting: targetingToSend,

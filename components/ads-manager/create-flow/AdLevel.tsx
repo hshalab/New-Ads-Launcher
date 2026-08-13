@@ -239,12 +239,12 @@ export function AdLevel({
         })}
       />
       <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-6 px-6 py-8 pb-20">
+        <div className="mx-auto max-w-3xl space-y-6 px-6 py-8 pb-10">
           <div className="flex items-center gap-2">
             <h1 className="text-xl font-bold text-[#1c2b33] dark:text-gray-100">Ad</h1>
           </div>
 
-          <div className="space-y-4 rounded-lg border border-[#e4e6eb] p-5 shadow-sm dark:border-gray-800">
+          <div className="space-y-4 rounded-lg border border-[#e4e6eb] bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-card">
             <div>
               <label className="text-xs font-semibold text-[#1c2b33] dark:text-gray-200">
                 Ad name <span className="text-red-500">*</span>
@@ -286,7 +286,7 @@ export function AdLevel({
             </div>
           </div>
 
-          <div className="space-y-4 rounded-lg border border-[#e4e6eb] p-5 shadow-sm dark:border-gray-800">
+          <div className="space-y-4 rounded-lg border border-[#e4e6eb] bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-card">
             <h3 className="text-sm font-semibold text-[#1c2b33] dark:text-gray-100">Identity</h3>
 
             <div>
@@ -336,7 +336,7 @@ export function AdLevel({
             </div>
           </div>
 
-          <div className="space-y-4 rounded-lg border border-[#e4e6eb] p-5 shadow-sm dark:border-gray-800">
+          <div className="space-y-4 rounded-lg border border-[#e4e6eb] bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-card">
             <div className="flex items-baseline justify-between gap-3">
               <h3 className="text-sm font-semibold text-[#1c2b33] dark:text-gray-100">Ad setup</h3>
               <div className="flex items-center gap-3">

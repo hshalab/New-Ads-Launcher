@@ -1,16 +1,27 @@
-export type CampaignObjective = "OUTCOME_SALES" | "OUTCOME_TRAFFIC" | "OUTCOME_AWARENESS"
+// The objective → conversion location → engagement type → performance goal chain has exactly one
+// definition, shared with the route, so a combination the server would reject cannot be selected.
+export type {
+  CampaignObjective,
+  ConversionLocation,
+  EngagementType,
+  PerformanceGoal,
+} from "@/lib/odax-matrix"
+
+import type {
+  CampaignObjective,
+  ConversionLocation,
+  EngagementType,
+  PerformanceGoal,
+} from "@/lib/odax-matrix"
+
+export type { BidStrategy } from "@/lib/create-campaign-bidding"
+import type { BidStrategy } from "@/lib/create-campaign-bidding"
 
 export type SpecialAdCategory =
   | "CREDIT"
   | "EMPLOYMENT"
   | "HOUSING"
   | "ISSUES_ELECTIONS_POLITICS"
-
-export type PerformanceGoal =
-  | "OFFSITE_CONVERSIONS"
-  | "LINK_CLICKS"
-  | "LANDING_PAGE_VIEWS"
-  | "REACH"
 
 export type GenderTargeting = "ALL" | "MALE" | "FEMALE"
 export type MediaType = "image" | "video"
@@ -50,19 +61,32 @@ export interface CreativeAssetOption {
 
 export interface CampaignFormState {
   // Campaign
+  /**
+   * Set = Ads Manager's "New ad set or ad" scope: the ad set attaches to this campaign instead of
+   * creating one. Everything else in this block then belongs to Meta — name, objective, special ad
+   * categories, budget mode — and the campaign step renders read-only.
+   */
+  existingCampaignId: string
+  existingCampaignName: string
   campaignName: string
   objective: CampaignObjective
   specialAdCategories: SpecialAdCategory[]
   advantageCampaignBudget: boolean
   campaignBudget: string
+  campaignBidStrategy: BidStrategy
 
   // Ad Set
   adSetName: string
-  conversionLocation: "website"
+  // null when the objective has no conversion location card at all (Awareness).
+  conversionLocation: ConversionLocation | null
+  engagementType: EngagementType | null
   performanceGoal: PerformanceGoal
   pixelId: string
   conversionEvent: ConversionEvent
+  /** Cap value for COST_CAP / BID_CAP. Cleared when strategy is Highest volume or ROAS. */
   costPerResultGoal: string
+  /** ROAS floor multiplier (e.g. "1.5"). Only valid with LOWEST_COST_WITH_MIN_ROAS + VALUE. */
+  roasGoal: string
   attributionClickDays: AttributionClickDays
   attributionViewDays: AttributionViewDays
   attributionEngagedViewDays: AttributionEngagedViewDays
@@ -136,18 +160,23 @@ export interface TargetingOption {
 }
 
 export const defaultCampaignState: CampaignFormState = {
+  existingCampaignId: "",
+  existingCampaignName: "",
   campaignName: "New Campaign",
   objective: "OUTCOME_SALES",
   specialAdCategories: [],
   advantageCampaignBudget: true,
   campaignBudget: "100",
+  campaignBidStrategy: "LOWEST_COST_WITHOUT_CAP",
 
   adSetName: "New Ad Set",
   conversionLocation: "website",
+  engagementType: null,
   performanceGoal: "OFFSITE_CONVERSIONS",
   pixelId: "",
   conversionEvent: "PURCHASE",
   costPerResultGoal: "",
+  roasGoal: "",
   attributionClickDays: "7",
   attributionViewDays: "0",
   attributionEngagedViewDays: "0",

@@ -1108,6 +1108,45 @@ export async function getResourceAccountId(resourceId: string, accessToken: stri
   return data.account_id ? String(data.account_id) : null
 }
 
+export interface AttachTargetCampaign {
+  id: string
+  name: string
+  objective: string
+  account_id: string
+  /** Present ⇒ CBO: the campaign owns the budget and its ad sets must not carry one. */
+  daily_budget?: string
+  lifetime_budget?: string
+  status?: string
+}
+
+/**
+ * Read the fields the "New ad set or ad" scope needs from an existing campaign.
+ *
+ * Three of them are load-bearing. `objective` drives the ODAX chain the new ad set must satisfy —
+ * Meta only validates that link at ad-set creation, so a mismatch surfaces as error 100 after the
+ * request is already half-done. A campaign-level budget (`daily_budget` / `lifetime_budget`) means
+ * CBO, and an ad set created under a CBO campaign must not carry a budget of its own. `account_id`
+ * is what proves the campaign belongs to the ad account this request is scoped to — without it a
+ * caller could attach an ad set to any campaign id it can guess.
+ */
+export async function getCampaignForAttach(
+  campaignId: string,
+  accessToken: string,
+  opts?: { isManual?: boolean }
+): Promise<AttachTargetCampaign> {
+  const fields = "id,name,objective,account_id,daily_budget,lifetime_budget,status"
+  const res = await secureMetaFetch(
+    `${GRAPH_API_BASE}/${campaignId}?fields=${fields}&access_token=${accessToken}`,
+    undefined,
+    { skipProof: opts?.isManual }
+  )
+  const data = await res.json()
+  if (!res.ok || data?.error) {
+    throw new Error(data?.error?.message || "Failed to read the selected campaign")
+  }
+  return data as AttachTargetCampaign
+}
+
 // Create a new campaign
 export async function createCampaign(
   adAccountId: string,
@@ -1153,6 +1192,7 @@ export async function createAdSet(
     billing_event: string
     bid_amount?: string
     bid_strategy?: string
+    bid_constraints?: { roas_average_floor: number }
     daily_budget?: string
     lifetime_budget?: string
     status?: string
@@ -1177,6 +1217,7 @@ export async function createAdSet(
   }
   if (params.bid_amount) body.bid_amount = params.bid_amount
   if (params.bid_strategy) body.bid_strategy = params.bid_strategy
+  if (params.bid_constraints) body.bid_constraints = JSON.stringify(params.bid_constraints)
   if (params.daily_budget) body.daily_budget = params.daily_budget
   if (params.lifetime_budget) body.lifetime_budget = params.lifetime_budget
   if (params.start_time) body.start_time = params.start_time
@@ -2561,6 +2602,31 @@ export async function getNodeTargeting(
   return data?.targeting
 }
 
+/**
+ * Read a campaign's objective, for validating an ad set edit against the ODAX table (TD-42).
+ *
+ * Never throws: the objective is used to *refuse* a change, so a failed read must leave the edit
+ * exactly as permissive as it is today rather than blocking it.
+ */
+export async function getCampaignObjective(
+  campaignId: string,
+  accessToken: string,
+  opts?: { isManual?: boolean }
+): Promise<string | undefined> {
+  try {
+    const res = await secureMetaFetch(
+      `${GRAPH_API_BASE}/${campaignId}?fields=objective&access_token=${encodeURIComponent(accessToken)}`,
+      undefined,
+      { skipProof: opts?.isManual }
+    )
+    if (!res.ok) return undefined
+    const data = await res.json()
+    return typeof data?.objective === "string" ? data.objective : undefined
+  } catch {
+    return undefined
+  }
+}
+
 // Update a node (Campaign, AdSet, or Ad)
 export async function updateNode(
   nodeId: string,
@@ -2576,6 +2642,8 @@ export async function updateNode(
     optimization_goal?: string
     bid_strategy?: string
     bid_amount?: number
+    /** Ad-set only. ROAS floor for LOWEST_COST_WITH_MIN_ROAS, already scaled ×10000. */
+    bid_constraints?: { roas_average_floor?: number }
     attribution_spec?: unknown
     promoted_object?: unknown
     targeting?: unknown
@@ -2600,6 +2668,7 @@ export async function updateNode(
   if (params.optimization_goal) body.set("optimization_goal", params.optimization_goal)
   if (params.bid_strategy) body.set("bid_strategy", params.bid_strategy)
   if (params.bid_amount !== undefined) body.set("bid_amount", String(Math.round(params.bid_amount * 100)))
+  if (params.bid_constraints !== undefined) body.set("bid_constraints", JSON.stringify(params.bid_constraints))
   if (params.attribution_spec !== undefined) body.set("attribution_spec", JSON.stringify(params.attribution_spec))
   if (params.promoted_object !== undefined) body.set("promoted_object", JSON.stringify(params.promoted_object))
   if (params.targeting !== undefined) body.set("targeting", JSON.stringify(params.targeting))

@@ -18,6 +18,15 @@ import { cn } from "@/lib/utils"
 import type { Level } from "./InsightDrawers"
 import { LoadMediaModal } from "@/components/shared/load-media-modal"
 import { LocationsField, hasAnyLocation, type GeoLocations } from "./LocationsField"
+import { CampaignRecommendationsCard, EstimatedAudienceCard } from "./AdSetInsightsSidebar"
+import {
+  PIXEL_GOALS,
+  buildAdSetRecommendations,
+  type AdSetRecommendation,
+} from "@/lib/adset-recommendations"
+import { allowedPerformanceGoals } from "@/lib/workspace-odax-guard"
+import { BID_STRATEGY_LABEL } from "@/lib/create-campaign-bidding"
+import type { TargetingInput } from "@/lib/create-campaign-targeting"
 import type { Creative } from "@/types/creative"
 
 type FbPage = {
@@ -43,6 +52,8 @@ export type WorkspaceNode = {
   optimization_goal?: string
   bid_strategy?: string
   bid_amount?: string
+  /** ROAS floor for LOWEST_COST_WITH_MIN_ROAS. Meta stores it ×10000 (1.5x → 15000). */
+  bid_constraints?: { roas_average_floor?: number }
   billing_event?: string
   conversion_location?: string
   destination_type?: string
@@ -95,6 +106,24 @@ export type WorkspaceNode = {
   primary_text_variations?: string[]
   headline_variations?: string[]
   description_variations?: string[]
+
+  /**
+   * Draft-only (BL-64). Meta never returns these — they exist so an *unpublished* hierarchy can be
+   * one `WorkspaceNode` shape like every other node the editor renders, instead of a second state
+   * model. `lib/workspace-draft-adapter.ts` is the only writer; a live node leaves them undefined.
+   */
+  /** Set on a draft campaign under the attach scope: the Meta campaign it will be created under. */
+  draft_of?: string
+  engagement_type?: string
+  schedule_time_basis?: "account" | "utc"
+  instagram_id?: string
+  creative_ids?: string[]
+  selected_creatives?: { id: string; file_name: string; preview_url: string; media_type: "image" | "video" }[]
+  creative_file_name?: string
+  media_url?: string
+  media_type?: "image" | "video"
+  one_ad_per_adset?: boolean
+  url_parameters?: string
 }
 
 type HierarchyPath = {
@@ -114,6 +143,11 @@ type Props = {
   onRefresh?: () => void
   onDraftChange?: (node: WorkspaceNode, level: Level) => void
   accountId?: string
+  /**
+   * The parent campaign's Meta objective. The ad set node does not carry it, and without it the
+   * performance-goal list cannot be resolved from `lib/odax-matrix.ts` (TD-42).
+   */
+  campaignObjective?: string
   hierarchyPath?: HierarchyPath
   hasDraft?: boolean
   onClose?: () => void
@@ -161,13 +195,21 @@ const OBJECTIVE_LABEL: Record<string, string> = {
   CONVERSIONS: "Conversions",
 }
 
-const BID_LABEL: Record<string, string> = {
-  LOWEST_COST_WITHOUT_CAP: "Highest volume or value",
-  LOWEST_COST_WITH_BID_CAP: "Bid cap",
-  COST_CAP: "Cost per result goal",
-  MINIMUM_ROAS: "Minimum ROAS",
-}
+/**
+ * Same labels the create flow shows, from the same map — a strategy that reads "Highest volume"
+ * when you create it must not read "Highest volume or value" when you edit it (TD-42).
+ *
+ * The editor keeps its own picker rather than rendering `BidStrategySection`: that component
+ * deliberately omits ROAS goal (BL-56, no VALUE row in the ODAX matrix), and an existing ad set may
+ * already be on `LOWEST_COST_WITH_MIN_ROAS` — hiding it would silently rewrite live bidding.
+ */
+const BID_LABEL: Record<string, string> = BID_STRATEGY_LABEL
 
+/**
+ * Fallback labels only. The *options* come from `lib/odax-matrix.ts` whenever the objective and
+ * conversion location resolve to a row — this list used to be the option source, which is how the
+ * editor came to offer goals the campaign objective rejects (TD-42).
+ */
 const OPT_LABEL: Record<string, string> = {
   LINK_CLICKS: "Link clicks",
   IMPRESSIONS: "Impressions",
@@ -179,8 +221,6 @@ const OPT_LABEL: Record<string, string> = {
   LEAD_GENERATION: "Lead generation",
   APP_INSTALLS: "App installs",
 }
-
-const PIXEL_GOALS = new Set(["OFFSITE_CONVERSIONS", "CONVERSIONS"])
 
 const DESTINATION_LABEL: Record<string, string> = {
   WEBSITE: "Website",
@@ -458,6 +498,7 @@ export function UnifiedWorkspaceEditor({
   onRefresh,
   onDraftChange,
   accountId = "",
+  campaignObjective,
   hierarchyPath,
   hasDraft = false,
   onClose,
@@ -681,6 +722,23 @@ export function UnifiedWorkspaceEditor({
     setDraft({ ...draft, targeting })
   }
 
+  // TD-42: the goal list comes from the same table the create flow reads. When the objective +
+  // destination_type combination is not in the table the editor falls back to the old flat list
+  // rather than showing an empty picker — unknown is not the same as disallowed, and the server
+  // guard degrades open on exactly the same condition.
+  const odaxGoals = allowedPerformanceGoals(campaignObjective, draft.destination_type)
+  const goalOptions: Array<[string, string]> = (() => {
+    if (!odaxGoals) return Object.entries(OPT_LABEL)
+    const options = odaxGoals.map(goal => [goal, OPT_LABEL[goal] || goal] as [string, string])
+    // An ad set created before this rule existed may hold a goal outside its row. Keep it listed —
+    // dropping it would make the select render blank and turn an unrelated edit into a goal change.
+    const current = draft.optimization_goal
+    if (current && !odaxGoals.includes(current as (typeof odaxGoals)[number])) {
+      options.push([current, `${OPT_LABEL[current] || current} (current)`])
+    }
+    return options
+  })()
+
   const conversionLocation = draft.destination_type
     ? DESTINATION_LABEL[draft.destination_type] || draft.destination_type
     : draft.conversion_location || "Website"
@@ -697,6 +755,50 @@ export function UnifiedWorkspaceEditor({
       ? "Add at least one location — Meta rejects an empty location set"
       : null,
   ].filter(Boolean) as string[]
+
+  // The right rail: ad preview at the ad level, Meta's audience estimate + our checks at the ad
+  // set. The campaign level has neither — there is no targeting there to estimate.
+  const hasRail = level === "ad" || level === "adset"
+
+  // Mapped to the same TargetingInput `buildTargeting` and the create route take, so the estimate
+  // is computed from the targeting Meta would actually receive, not an approximation of it.
+  const estimateTargeting: TargetingInput = useMemo(
+    () => ({
+      locations: draft.targeting?.geo_locations?.countries || [],
+      ageMin: draft.targeting?.age_min || 18,
+      ageMax: draft.targeting?.age_max || 65,
+      gender:
+        draft.targeting?.genders?.[0] === 1
+          ? "MALE"
+          : draft.targeting?.genders?.[0] === 2
+            ? "FEMALE"
+            : "ALL",
+      placementMode: (draft.targeting?.publisher_platforms?.length || 0) > 0 ? "manual" : "advantage",
+      publisherPlatforms: (draft.targeting?.publisher_platforms || []) as TargetingInput["publisherPlatforms"],
+      // Meta returns audience expansion on read as `targeting_optimization`, while the create path
+      // writes `targeting_automation.advantage_audience`. Same switch, two field names.
+      targetingExpansion: draft.targeting?.targeting_optimization === "expansion_all",
+    }),
+    [draft.targeting]
+  )
+
+  // Checks against the saved ad set, not against a create form. The checks themselves live in
+  // lib/adset-recommendations.ts so the create flow fires exactly the same ones — the score there
+  // must not change when the ad set is saved without anything about it changing. Only the mapping
+  // out of Meta's draft shape is local, because `geo_locations` here can carry cities and regions
+  // that the create form has no equivalent for.
+  const adSetRecommendations = useMemo<AdSetRecommendation[]>(() => {
+    if (level !== "adset") return []
+    return buildAdSetRecommendations({
+      hasLocation: hasAnyLocation(draft.targeting?.geo_locations),
+      optimizationGoal: draft.optimization_goal || "",
+      pixelId: draft.promoted_object?.pixel_id,
+      publisherPlatformCount: draft.targeting?.publisher_platforms?.length || 0,
+      targetingExpansion: draft.targeting?.targeting_optimization === "expansion_all",
+      ageMin: draft.targeting?.age_min || 18,
+      ageMax: draft.targeting?.age_max || 65,
+    })
+  }, [level, draft.targeting, draft.optimization_goal, draft.promoted_object])
 
   const copyId = async () => {
     try {
@@ -821,11 +923,11 @@ export function UnifiedWorkspaceEditor({
 
       <div className={cn(
         "grid min-h-0 flex-1 grid-cols-1",
-        level === "ad" && "xl:grid-cols-[minmax(420px,1fr)_minmax(320px,420px)]",
+        hasRail && "xl:grid-cols-[minmax(420px,1fr)_minmax(320px,420px)]",
       )}>
         <div className={cn(
           "min-h-0 overflow-y-auto bg-white dark:bg-card",
-          level === "ad" && "xl:border-r",
+          hasRail && "xl:border-r",
         )}>
           <div className="mx-auto max-w-4xl space-y-6 px-6 py-6">
             {error && (
@@ -953,7 +1055,7 @@ export function UnifiedWorkspaceEditor({
                           onChange={e => setDraft({ ...draft, optimization_goal: e.target.value })}
                         >
                           <option value="">Select goal</option>
-                          {Object.entries(OPT_LABEL).map(([val, label]) => (
+                          {goalOptions.map(([val, label]) => (
                             <option key={val} value={val}>{label}</option>
                           ))}
                         </select>
@@ -999,33 +1101,73 @@ export function UnifiedWorkspaceEditor({
                           </div>
                         </>
                       )}
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <Label className="text-xs text-muted-foreground">Cost per result goal</Label>
-                          <span className="text-xs text-muted-foreground">Optional</span>
-                        </div>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">$</span>
+                      {/* ROAS goal takes a multiplier floor, not money — and Meta rejects bid_amount
+                          alongside it, so the two inputs are mutually exclusive. */}
+                      {draft.bid_strategy === "LOWEST_COST_WITH_MIN_ROAS" ? (
+                        <div className="space-y-1.5">
+                          <Label className="text-xs text-muted-foreground">Minimum ROAS</Label>
                           <Input
                             type="number"
-                            min="0"
-                            step=".01"
-                            className="pl-7"
-                            value={draft.bid_amount ? (parseInt(draft.bid_amount) / 100) : ""}
+                            min="0.01"
+                            step="0.01"
+                            value={
+                              draft.bid_constraints?.roas_average_floor
+                                ? draft.bid_constraints.roas_average_floor / 10000
+                                : ""
+                            }
                             onChange={e => setDraft({
                               ...draft,
-                              bid_amount: e.target.value ? String(Math.round(parseFloat(e.target.value) * 100)) : "",
+                              bid_amount: "",
+                              bid_constraints: e.target.value
+                                ? { roas_average_floor: Math.round(parseFloat(e.target.value) * 10000) }
+                                : undefined,
                             })}
-                            placeholder="0.00"
+                            placeholder="1.50"
                           />
+                          <p className="text-[11px] text-muted-foreground">
+                            Return on ad spend, as a multiple of spend (1.5 = 150%).
+                          </p>
                         </div>
-                      </div>
+                      ) : (
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <Label className="text-xs text-muted-foreground">Cost per result goal</Label>
+                            <span className="text-xs text-muted-foreground">Optional</span>
+                          </div>
+                          <div className="relative">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">$</span>
+                            <Input
+                              type="number"
+                              min="0"
+                              step=".01"
+                              className="pl-7"
+                              value={draft.bid_amount ? (parseInt(draft.bid_amount) / 100) : ""}
+                              onChange={e => setDraft({
+                                ...draft,
+                                bid_amount: e.target.value ? String(Math.round(parseFloat(e.target.value) * 100)) : "",
+                              })}
+                              placeholder="0.00"
+                            />
+                          </div>
+                        </div>
+                      )}
                       <div className="space-y-1.5">
                         <Label className="text-xs text-muted-foreground">Bid strategy</Label>
                         <select
                           className={selectControlClass}
                           value={draft.bid_strategy || ""}
-                          onChange={e => setDraft({ ...draft, bid_strategy: e.target.value })}
+                          onChange={e => {
+                            // Switching strategy drops the value the new one cannot carry, in the
+                            // same set — Meta rejects a ROAS floor sent with a bid amount, and a
+                            // stale hidden field would otherwise survive all the way to publish.
+                            const next = e.target.value
+                            setDraft({
+                              ...draft,
+                              bid_strategy: next,
+                              bid_amount: next === "LOWEST_COST_WITH_MIN_ROAS" ? undefined : draft.bid_amount,
+                              bid_constraints: next === "LOWEST_COST_WITH_MIN_ROAS" ? draft.bid_constraints : undefined,
+                            })
+                          }}
                         >
                           <option value="">Select strategy</option>
                           {Object.entries(BID_LABEL).map(([val, label]) => (
@@ -1305,9 +1447,6 @@ export function UnifiedWorkspaceEditor({
                         </p>
                       </SplitBlock>
 
-                      <p className="rounded-md border border-dashed bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                        Estimated audience size unavailable — reach estimate API not integrated.
-                      </p>
                     </div>
                   </Section>
 
@@ -1627,15 +1766,27 @@ export function UnifiedWorkspaceEditor({
           </div>
         </div>
 
-        {level === "ad" && (
+        {hasRail && (
           <aside className="min-h-0 space-y-4 overflow-y-auto bg-[#f5f6f7] p-5 dark:bg-background">
-            <section className="rounded-lg border border-[#e4e6eb] bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-card">
-              <p className="mb-3 text-sm font-semibold">Preview</p>
-              <AdPreview node={draft} />
-              <p className="mt-3 text-xs text-muted-foreground">
-                Built from this draft, not Meta&apos;s own preview. Advanced multi-placement preview is deferred to BL-39.
-              </p>
-            </section>
+            {level === "ad" && (
+              <section className="rounded-lg border border-[#e4e6eb] bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-card">
+                <p className="mb-3 text-sm font-semibold">Preview</p>
+                <AdPreview node={draft} />
+                <p className="mt-3 text-xs text-muted-foreground">
+                  Built from this draft, not Meta&apos;s own preview. Advanced multi-placement preview is deferred to BL-39.
+                </p>
+              </section>
+            )}
+            {level === "adset" && (
+              <>
+                <EstimatedAudienceCard
+                  accountId={accountId}
+                  optimizationGoal={draft.optimization_goal || ""}
+                  targeting={estimateTargeting}
+                />
+                <CampaignRecommendationsCard recommendations={adSetRecommendations} />
+              </>
+            )}
           </aside>
         )}
       </div>

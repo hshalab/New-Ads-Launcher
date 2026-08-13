@@ -113,11 +113,25 @@ describe("Ads Manager editor shell + MECE contract (BL-39 B8)", () => {
     assert.match(editor, /Set at create\. Not reassigned in the editor\./)
   })
 
-  it("keeps the preview rail on Ad only and drops the deferred rail cards", () => {
-    assert.match(editor, /\{level === "ad" && \(\s*<aside/)
-    assert.doesNotMatch(editor, /Recommendations/)
+  it("gives Ad the preview rail and Ad Set the insights rail, and Campaign neither", () => {
+    // The rail is shared chrome now: preview at the ad, audience estimate + recommendations at the
+    // ad set. Campaign has no targeting, so an audience estimate there would be a number about
+    // nothing — that is why hasRail excludes it.
+    assert.match(editor, /const hasRail = level === "ad" \|\| level === "adset"/)
+    assert.match(editor, /\{hasRail && \(\s*<aside/)
+    assert.match(editor, /\{level === "ad" && \(\s*<section/)
+    assert.match(editor, /<EstimatedAudienceCard/)
+    assert.match(editor, /<CampaignRecommendationsCard/)
     assert.doesNotMatch(editor, /Advanced preview/i)
     assert.match(editor, /Advanced multi-placement preview is deferred to BL-39/)
+  })
+
+  it("estimates the audience from the targeting Meta would actually receive", () => {
+    // A different targeting object would make the number a confident lie about a different
+    // audience, so the rail maps the draft into the same TargetingInput the create route uses.
+    assert.match(editor, /const estimateTargeting: TargetingInput/)
+    assert.match(editor, /locations: draft\.targeting\?\.geo_locations\?\.countries \|\| \[\]/)
+    assert.match(editor, /optimizationGoal=\{draft\.optimization_goal \|\| ""\}/)
   })
 
   it("does not render deferred-surface prose banners", () => {
@@ -138,7 +152,6 @@ describe("Ads Manager editor shell + MECE contract (BL-39 B8)", () => {
     // publish blocker rather than "not loaded".
     assert.match(editor, /<LocationsField/)
     assert.match(editor, /excluded_geo_locations: excluded/)
-    assert.match(editor, /Estimated audience size unavailable/)
     const transparencyIdx = editor.indexOf('title="Ad transparency"')
     const placementsIdx = editor.indexOf('title="Placements"')
     assert.ok(transparencyIdx > 0 && placementsIdx > transparencyIdx)

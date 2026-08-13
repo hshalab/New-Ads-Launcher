@@ -160,10 +160,25 @@ const METRIC_METHODOLOGY = {
   avgDuration: "Mean server-side batch duration_ms in the period.",
 }
 
-function formatDuration(durationMs: number | null) {
-  if (durationMs === null) return "-"
-  const seconds = Math.round(durationMs / 1_000)
-  return seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`
+function formatDuration(durationMs: number | null | undefined) {
+  if (durationMs == null || !Number.isFinite(durationMs)) return "-"
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1_000))
+  if (totalSeconds < 60) return `${totalSeconds}s`
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return seconds > 0 ? `${hours}h ${minutes}m ${seconds}s` : minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
+}
+
+function formatDurationTick(durationMs: number) {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return "0"
+  const totalSeconds = Math.round(durationMs / 1_000)
+  if (totalSeconds < 60) return `${totalSeconds}s`
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`
+  return `${minutes}m`
 }
 
 function formatBucket(bucket: string, days: number) {
@@ -252,21 +267,54 @@ function TrendChart({ series, dataKey, days, color = "#3987e5" }: { series: any[
     )
   }
 
+  const isDuration = dataKey === "avgDurationMs"
+  // Recharts drops line segments across nulls; keep numeric domain, format only labels.
+  const chartSeries = isDuration
+    ? series.map(point => {
+        const raw = point?.[dataKey]
+        const value = typeof raw === "number" && Number.isFinite(raw) ? raw : null
+        return { ...point, [dataKey]: value }
+      })
+    : series
+  const durationMax = isDuration
+    ? chartSeries.reduce((max, point) => {
+        const value = point?.[dataKey]
+        return typeof value === "number" && value > max ? value : max
+      }, 0)
+    : 0
+
   return (
     <div className="h-64 w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={series} margin={{ top: 8, right: 12, bottom: 4, left: -8 }}>
+        <LineChart data={chartSeries} margin={{ top: 8, right: 12, bottom: 4, left: isDuration ? 0 : -8 }}>
           <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
           <XAxis {...xProps} />
-          <YAxis stroke="#898781" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
+          <YAxis
+            stroke="#898781"
+            tick={{ fontSize: 11 }}
+            tickLine={false}
+            axisLine={false}
+            width={isDuration ? 56 : 40}
+            domain={isDuration ? [0, Math.max(durationMax * 1.1, 1)] : ["auto", "auto"]}
+            tickFormatter={isDuration ? (v: number) => formatDurationTick(Number(v)) : undefined}
+            allowDecimals={!isDuration}
+          />
           <Tooltip
             contentStyle={{ background: "#1a1a19", border: "1px solid rgba(255,255,255,0.10)", borderRadius: 8, fontSize: 12, color: "#ffffff" }}
             itemStyle={{ color: "#ffffff" }}
             labelStyle={{ color: "#898781" }}
             labelFormatter={v => formatBucket(String(v), days)}
-            formatter={value => dataKey === "avgDurationMs" ? [formatDuration(Number(value)), "Duration"] : [String(value), getLabelName(String(dataKey))]}
+            formatter={value => isDuration ? [formatDuration(typeof value === "number" ? value : Number(value)), "Duration"] : [String(value), getLabelName(String(dataKey))]}
           />
-          <Line type="monotone" dataKey={dataKey} stroke={color} strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+          <Line
+            type="monotone"
+            dataKey={dataKey}
+            stroke={color}
+            strokeWidth={2}
+            connectNulls={isDuration}
+            dot={isDuration ? { r: 3, strokeWidth: 0, fill: color } : false}
+            activeDot={{ r: 4 }}
+          />
         </LineChart>
       </ResponsiveContainer>
     </div>

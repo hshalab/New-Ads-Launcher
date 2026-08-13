@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation"
 import { AdAccountPill } from "@/components/shared/ad-account-pill"
 import { useAdAccount } from "@/lib/ad-account-context"
 import { LatestRequestGuard } from "@/lib/latest-request-guard"
+import { BID_STRATEGY_LABEL } from "@/lib/create-campaign-bidding"
 import { cn } from "@/lib/utils"
 import {
   IconPlus, IconCopy, IconPencil, IconRefresh,
@@ -906,6 +907,28 @@ const ROW_BG = {
   odd: "bg-[#f7f8fa] dark:bg-[#1b1d23]",
 } as const
 const rowBg = (i: number) => (i % 2 === 0 ? ROW_BG.even : ROW_BG.odd)
+/**
+ * Row background for the two "this row is not like the others" states: amber = just published in this
+ * session, emerald = has unpublished bulk edits. Amber wins, because it expires on its own and the
+ * user is looking for it right now. Selection still beats both and is applied by the caller.
+ *
+ * Three class sets because the frozen columns are sticky and paint over the <tr> background: `row`
+ * for the <tr>, `cell` for each frozen <td>, `hover` for the frozen cells' group-hover state.
+ */
+function rowTint(isNew: boolean, hasDraft: boolean) {
+  if (isNew) return {
+    tinted: true,
+    tintRow: "bg-amber-50/80 dark:bg-amber-950/20 hover:bg-amber-50/80 dark:hover:bg-amber-950/20",
+    tintCell: "bg-amber-50 dark:bg-amber-950/30",
+    tintHover: "group-hover/row:bg-amber-50 dark:group-hover/row:bg-amber-950/30",
+  }
+  return {
+    tinted: hasDraft,
+    tintRow: "bg-emerald-50/80 dark:bg-emerald-950/20 hover:bg-emerald-50/80 dark:hover:bg-emerald-950/20",
+    tintCell: "bg-emerald-50 dark:bg-emerald-950/30",
+    tintHover: "group-hover/row:bg-emerald-50 dark:group-hover/row:bg-emerald-950/30",
+  }
+}
 const FROZEN_BODY_SEL = "bg-[#e3f0fe] dark:bg-[#1d2235]"
 const FROZEN_BAND_BG = "bg-[#f5f6f7] dark:bg-background"
 /**
@@ -1219,6 +1242,13 @@ function AdsManagerContent() {
   const [defaultPrimaryText, setDefaultPrimaryText] = useState("")
   const [createModalOpen, setCreateModalOpen] = useState(false)
   const [createInitialState, setCreateInitialState] = useState<Partial<CampaignFormState> | undefined>()
+  // Rows this session just published. The refetch after a publish drops the new objects into a list
+  // that can be hundreds long and sorted by spend, where a brand-new PAUSED object sinks to the
+  // bottom — so the toast says "published" and the table shows no visible change. Holding the ids
+  // for a few seconds is what turns "it worked" into "there it is".
+  const [justPublishedIds, setJustPublishedIds] = useState<Set<string>>(new Set())
+  const justPublishedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (justPublishedTimer.current) clearTimeout(justPublishedTimer.current) }, [])
   const [defaultHeadline, setDefaultHeadline] = useState("")
   const [defaultCta, setDefaultCta] = useState("SHOP_NOW")
   const [defaultLink, setDefaultLink] = useState("")
@@ -1380,26 +1410,41 @@ function AdsManagerContent() {
   }
   const openCharts = (clicked: { id: string; name: string }) =>
     setPerformancePopup({ mode: "charts", rows: [toReportRow(clicked)], initialView: "charts" })
+  // The editor is a route, not a popup: /ads-manager/editor is intercepted by the @editor slot so
+  // this table stays mounted underneath and Collapse view has something to reveal. Both the row
+  // click and the post-publish handoff build the same URL, so the semantics live in one place.
+  const pushWorkspaceEditor = (target: {
+    level: Level
+    id: string
+    campaignId?: string
+    adSetId?: string
+  }) => {
+    const editorParams = new URLSearchParams({
+      account: selectedAccountId,
+      level: target.level,
+      id: target.id,
+      view: "edit",
+      date: datePreset,
+    })
+    if (target.campaignId) editorParams.set("campaign", target.campaignId)
+    if (target.adSetId) editorParams.set("adset", target.adSetId)
+    router.push(`/ads-manager/editor?${editorParams.toString()}`)
+  }
+
   const openWorkspaceEditor = (clicked: { id: string; name: string }) => {
     if (workspaceAccess.enabled) {
-      // The editor is a route, not a popup: /ads-manager/editor is intercepted by the @editor slot
-      // so this table stays mounted underneath and Collapse view has something to reveal.
       const editorLevel: Level = tab === "campaigns" ? "campaign" : tab === "adsets" ? "adset" : "ad"
       const source: any =
         campaigns.find(item => item.id === clicked.id)
         || adSets.find(item => item.id === clicked.id)
         || ads.find(item => item.id === clicked.id)
         || {}
-      const editorParams = new URLSearchParams({
-        account: selectedAccountId,
+      pushWorkspaceEditor({
         level: editorLevel,
         id: clicked.id,
-        view: "edit",
-        date: datePreset,
+        campaignId: source.campaign_id,
+        adSetId: source.adset_id,
       })
-      if (source.campaign_id) editorParams.set("campaign", source.campaign_id)
-      if (source.adset_id) editorParams.set("adset", source.adset_id)
-      router.push(`/ads-manager/editor?${editorParams.toString()}`)
       return
     }
     const node = campaigns.find(item => item.id === clicked.id)
@@ -3760,10 +3805,40 @@ function AdsManagerContent() {
           setCreateModalOpen(false)
           setCreateInitialState(undefined)
         }}
-        onSuccess={() => {
+        onSuccess={async (result) => {
           setCreateInitialState(undefined)
           clientCache.current.clear()
-          fetchMainData(true)
+          // Campaign and ad sets both go in. On the attach scope the campaign was already running,
+          // so its row is not "new" — but it is where the new ad set landed, and the user is
+          // usually looking at the campaigns tab when they publish.
+          const ids = [result.campaignId, ...result.adSetIds, ...result.adIds].filter(
+            (id): id is string => Boolean(id)
+          )
+          if (justPublishedTimer.current) clearTimeout(justPublishedTimer.current)
+          setJustPublishedIds(new Set(ids))
+          // Start the clock after the rows actually exist, not while the refetch is still running.
+          await fetchMainData(true)
+          justPublishedTimer.current = setTimeout(() => setJustPublishedIds(new Set()), 12000)
+          // Everything Meta created is PAUSED. Land the user on it in the editor instead of making
+          // them hunt the row they just made — on the attach scope that is the new ad set, since the
+          // campaign was already theirs and is not what changed.
+          if (!workspaceAccess.enabled) return
+          const newAdSetId = result.adSetIds[0]
+          if (result.attached && newAdSetId) {
+            pushWorkspaceEditor({
+              level: "adset",
+              id: newAdSetId,
+              campaignId: result.campaignId,
+              adSetId: newAdSetId,
+            })
+          } else if (result.campaignId) {
+            pushWorkspaceEditor({
+              level: "campaign",
+              id: result.campaignId,
+              campaignId: result.campaignId,
+              adSetId: newAdSetId,
+            })
+          }
         }}
       />
 
@@ -4335,20 +4410,21 @@ function AdsManagerContent() {
                   const bg = rowBg(idx)
                   const isSel = selectedIds.has(c.id)
                   const hasDraft = Boolean(bulkDrafts[bulkDraftKey("campaign", c.id)])
+                  const { tinted, tintRow, tintCell, tintHover } = rowTint(justPublishedIds.has(c.id), hasDraft)
                   const rowBDs = sortedBreakdownRows(c.id, c.objective)
                   return (
                     <Fragment key={c.id}>
-                      <tr className={cn("border-b border-[#e4e6eb] dark:border-gray-800 hover:bg-[#f5f6f7] dark:hover:bg-white/5 transition-colors group/row", bg, hasDraft && !isSel && "bg-emerald-50/80 dark:bg-emerald-950/20 hover:bg-emerald-50/80 dark:hover:bg-emerald-950/20", isSel && "bg-[#e3f0fe] dark:bg-blue-950/30 hover:bg-[#d8e9fc]")}>
-                        <td className={cn("px-2 sticky z-10 transition-colors", FROZEN_W.check, FROZEN_LEFT.check, bg, hasDraft && !isSel && "bg-emerald-50 dark:bg-emerald-950/30", isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : hasDraft ? "group-hover/row:bg-emerald-50 dark:group-hover/row:bg-emerald-950/30" : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
+                      <tr className={cn("border-b border-[#e4e6eb] dark:border-gray-800 hover:bg-[#f5f6f7] dark:hover:bg-white/5 transition-colors group/row", bg, tinted && !isSel && tintRow, isSel && "bg-[#e3f0fe] dark:bg-blue-950/30 hover:bg-[#d8e9fc]")}>
+                        <td className={cn("px-2 sticky z-10 transition-colors", FROZEN_W.check, FROZEN_LEFT.check, bg, tinted && !isSel && tintCell, isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : tinted ? tintHover : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
                           {/* onClick, not onChange — the range gesture needs shiftKey/ctrlKey off the mouse event. */}
                           <input type="checkbox" className="rounded size-[14px] accent-[#1877f2]" checked={isSel}
                             onChange={() => {}}
                             onClick={e => toggleRowSelection(c.id, e.shiftKey, e.ctrlKey || e.metaKey)} />
                         </td>
-                        <td className={cn("px-3 sticky z-10 transition-colors", FROZEN_W.toggle, FROZEN_LEFT.toggle, bg, hasDraft && !isSel && "bg-emerald-50 dark:bg-emerald-950/30", isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : hasDraft ? "group-hover/row:bg-emerald-50 dark:group-hover/row:bg-emerald-950/30" : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
+                        <td className={cn("px-3 sticky z-10 transition-colors", FROZEN_W.toggle, FROZEN_LEFT.toggle, bg, tinted && !isSel && tintCell, isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : tinted ? tintHover : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
                           {toggling.has(c.id) ? <IconLoader2 className="size-4 animate-spin text-[#65676b]" /> : <StatusToggle id={c.id} status={c.status} onToggle={toggleStatus} />}
                         </td>
-                        <td style={{ width: columnWidths.__name || 320, minWidth: columnWidths.__name || 320, maxWidth: columnWidths.__name || 320 }} className={cn("px-3 sticky z-10 transition-colors group/cell overflow-hidden", FROZEN_LEFT.name, bg, FROZEN_DIVIDER, hasDraft && !isSel && "bg-emerald-50 dark:bg-emerald-950/30", isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : hasDraft ? "group-hover/row:bg-emerald-50 dark:group-hover/row:bg-emerald-950/30" : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
+                        <td style={{ width: columnWidths.__name || 320, minWidth: columnWidths.__name || 320, maxWidth: columnWidths.__name || 320 }} className={cn("px-3 sticky z-10 transition-colors group/cell overflow-hidden", FROZEN_LEFT.name, bg, FROZEN_DIVIDER, tinted && !isSel && tintCell, isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : tinted ? tintHover : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
                           {inlineEditingId === c.id ? (
                             <div className="flex items-center gap-2"><Input value={inlineEditingName} onChange={e => setInlineEditingName(e.target.value)} onBlur={() => saveInlineRename(c.id)} onKeyDown={e => e.key === "Enter" && saveInlineRename(c.id)} className="h-7 text-xs py-1" autoFocus /></div>
                           ) : (
@@ -4356,6 +4432,7 @@ function AdsManagerContent() {
                               <div className="flex items-center gap-2">
                                 <button onClick={() => drillToAdSets(c)} className="text-[#1877f2] hover:underline text-xs font-semibold text-left line-clamp-2">{c.name}</button>
                                 {hasDraft && <span className="shrink-0 rounded-full border border-emerald-300 bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300">Unpublished edits</span>}
+                                {justPublishedIds.has(c.id) && <span className="shrink-0 rounded-full border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">Just published</span>}
                                 <button onClick={e => { e.stopPropagation(); setInlineEditingId(c.id); setInlineEditingName(c.name) }} className="opacity-0 group-hover/cell:opacity-100 p-0.5 hover:bg-black/5 rounded transition-opacity"><IconPencil className="size-3 text-[#65676b]" /></button>
                               </div>
                               <div className="flex items-center gap-1.5 opacity-0 group-hover/cell:opacity-100 transition-opacity">
@@ -4390,20 +4467,21 @@ function AdsManagerContent() {
                   const bg = rowBg(idx)
                   const isSel = selectedIds.has(a.id)
                   const hasDraft = Boolean(bulkDrafts[bulkDraftKey("adset", a.id)])
+                  const { tinted, tintRow, tintCell, tintHover } = rowTint(justPublishedIds.has(a.id), hasDraft)
                   const objective = campaigns.find(c => c.id === a.campaign_id)?.objective
                   const rowBDs = sortedBreakdownRows(a.id, objective)
                   return (
                     <Fragment key={a.id}>
-                      <tr className={cn("border-b border-[#e4e6eb] dark:border-gray-800 hover:bg-[#f5f6f7] dark:hover:bg-white/5 transition-colors group/row", bg, hasDraft && !isSel && "bg-emerald-50/80 dark:bg-emerald-950/20 hover:bg-emerald-50/80 dark:hover:bg-emerald-950/20", isSel && "bg-[#e3f0fe] dark:bg-blue-950/30 hover:bg-[#d8e9fc]")}>
-                        <td className={cn("px-2 sticky z-10 transition-colors", FROZEN_W.check, FROZEN_LEFT.check, bg, hasDraft && !isSel && "bg-emerald-50 dark:bg-emerald-950/30", isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : hasDraft ? "group-hover/row:bg-emerald-50 dark:group-hover/row:bg-emerald-950/30" : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
+                      <tr className={cn("border-b border-[#e4e6eb] dark:border-gray-800 hover:bg-[#f5f6f7] dark:hover:bg-white/5 transition-colors group/row", bg, tinted && !isSel && tintRow, isSel && "bg-[#e3f0fe] dark:bg-blue-950/30 hover:bg-[#d8e9fc]")}>
+                        <td className={cn("px-2 sticky z-10 transition-colors", FROZEN_W.check, FROZEN_LEFT.check, bg, tinted && !isSel && tintCell, isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : tinted ? tintHover : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
                           <input type="checkbox" className="rounded size-[14px] accent-[#1877f2]" checked={isSel}
                             onChange={() => {}}
                             onClick={e => toggleRowSelection(a.id, e.shiftKey, e.ctrlKey || e.metaKey)} />
                         </td>
-                        <td className={cn("px-3 sticky z-10 transition-colors", FROZEN_W.toggle, FROZEN_LEFT.toggle, bg, hasDraft && !isSel && "bg-emerald-50 dark:bg-emerald-950/30", isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : hasDraft ? "group-hover/row:bg-emerald-50 dark:group-hover/row:bg-emerald-950/30" : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
+                        <td className={cn("px-3 sticky z-10 transition-colors", FROZEN_W.toggle, FROZEN_LEFT.toggle, bg, tinted && !isSel && tintCell, isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : tinted ? tintHover : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
                           {toggling.has(a.id) ? <IconLoader2 className="size-4 animate-spin text-[#65676b]" /> : <StatusToggle id={a.id} status={a.status} onToggle={toggleStatus} />}
                         </td>
-                        <td style={{ width: columnWidths.__name || 320, minWidth: columnWidths.__name || 320, maxWidth: columnWidths.__name || 320 }} className={cn("px-3 sticky z-10 transition-colors group/cell overflow-hidden", FROZEN_LEFT.name, bg, FROZEN_DIVIDER, hasDraft && !isSel && "bg-emerald-50 dark:bg-emerald-950/30", isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : hasDraft ? "group-hover/row:bg-emerald-50 dark:group-hover/row:bg-emerald-950/30" : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
+                        <td style={{ width: columnWidths.__name || 320, minWidth: columnWidths.__name || 320, maxWidth: columnWidths.__name || 320 }} className={cn("px-3 sticky z-10 transition-colors group/cell overflow-hidden", FROZEN_LEFT.name, bg, FROZEN_DIVIDER, tinted && !isSel && tintCell, isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : tinted ? tintHover : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
                           {inlineEditingId === a.id ? (
                             <div className="flex items-center gap-2"><Input value={inlineEditingName} onChange={e => setInlineEditingName(e.target.value)} onBlur={() => saveInlineRename(a.id)} onKeyDown={e => e.key === "Enter" && saveInlineRename(a.id)} className="h-7 text-xs py-1" autoFocus /></div>
                           ) : (
@@ -4411,6 +4489,7 @@ function AdsManagerContent() {
                               <div className="flex items-center gap-2">
                                 <button onClick={() => drillToAds(a)} className="text-[#1877f2] hover:underline text-xs font-semibold text-left line-clamp-2">{a.name}</button>
                                 {hasDraft && <span className="shrink-0 rounded-full border border-emerald-300 bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300">Unpublished edits</span>}
+                                {justPublishedIds.has(a.id) && <span className="shrink-0 rounded-full border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">Just published</span>}
                                 <button onClick={e => { e.stopPropagation(); setInlineEditingId(a.id); setInlineEditingName(a.name) }} className="opacity-0 group-hover/cell:opacity-100 p-0.5 hover:bg-black/5 rounded transition-opacity"><IconPencil className="size-3 text-[#65676b]" /></button>
                               </div>
                               <div className="flex items-center gap-1.5 opacity-0 group-hover/cell:opacity-100 transition-opacity">
@@ -4446,21 +4525,22 @@ function AdsManagerContent() {
                   const adSet = adSets.find(s => s.id === a.adset_id)
                   const isSel = selectedIds.has(a.id)
                   const hasDraft = Boolean(bulkDrafts[bulkDraftKey("ad", a.id)])
-                  const thumb = a.creative?.thumbnail_url || a.creative?.image_url
+                  const { tinted, tintRow, tintCell, tintHover } = rowTint(justPublishedIds.has(a.id), hasDraft)
+                  const thumb =a.creative?.thumbnail_url || a.creative?.image_url
                   const objective = campaigns.find(c => c.id === a.campaign_id)?.objective
                   const rowBDs = sortedBreakdownRows(a.id, objective)
                   return (
                     <Fragment key={a.id}>
-                      <tr className={cn("border-b border-[#e4e6eb] dark:border-gray-800 hover:bg-[#f5f6f7] dark:hover:bg-white/5 transition-colors group/row", bg, hasDraft && !isSel && "bg-emerald-50/80 dark:bg-emerald-950/20 hover:bg-emerald-50/80 dark:hover:bg-emerald-950/20", isSel && "bg-[#e3f0fe] dark:bg-blue-950/30 hover:bg-[#d8e9fc]")}>
-                        <td className={cn("px-2 sticky z-10 transition-colors", FROZEN_W.check, FROZEN_LEFT.check, bg, hasDraft && !isSel && "bg-emerald-50 dark:bg-emerald-950/30", isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : hasDraft ? "group-hover/row:bg-emerald-50 dark:group-hover/row:bg-emerald-950/30" : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
+                      <tr className={cn("border-b border-[#e4e6eb] dark:border-gray-800 hover:bg-[#f5f6f7] dark:hover:bg-white/5 transition-colors group/row", bg, tinted && !isSel && tintRow, isSel && "bg-[#e3f0fe] dark:bg-blue-950/30 hover:bg-[#d8e9fc]")}>
+                        <td className={cn("px-2 sticky z-10 transition-colors", FROZEN_W.check, FROZEN_LEFT.check, bg, tinted && !isSel && tintCell, isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : tinted ? tintHover : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
                           <input type="checkbox" className="rounded size-[14px] accent-[#1877f2]" checked={isSel}
                             onChange={() => {}}
                             onClick={e => toggleRowSelection(a.id, e.shiftKey, e.ctrlKey || e.metaKey)} />
                         </td>
-                        <td className={cn("px-3 sticky z-10 transition-colors", FROZEN_W.toggle, FROZEN_LEFT.toggle, bg, hasDraft && !isSel && "bg-emerald-50 dark:bg-emerald-950/30", isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : hasDraft ? "group-hover/row:bg-emerald-50 dark:group-hover/row:bg-emerald-950/30" : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
+                        <td className={cn("px-3 sticky z-10 transition-colors", FROZEN_W.toggle, FROZEN_LEFT.toggle, bg, tinted && !isSel && tintCell, isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : tinted ? tintHover : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
                           {toggling.has(a.id) ? <IconLoader2 className="size-4 animate-spin text-[#65676b]" /> : <StatusToggle id={a.id} status={a.status} onToggle={toggleStatus} />}
                         </td>
-                        <td style={{ width: columnWidths.__name || 320, minWidth: columnWidths.__name || 320, maxWidth: columnWidths.__name || 320 }} className={cn("px-3 sticky z-10 transition-colors group/cell overflow-hidden", FROZEN_LEFT.name, bg, FROZEN_DIVIDER, hasDraft && !isSel && "bg-emerald-50 dark:bg-emerald-950/30", isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : hasDraft ? "group-hover/row:bg-emerald-50 dark:group-hover/row:bg-emerald-950/30" : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
+                        <td style={{ width: columnWidths.__name || 320, minWidth: columnWidths.__name || 320, maxWidth: columnWidths.__name || 320 }} className={cn("px-3 sticky z-10 transition-colors group/cell overflow-hidden", FROZEN_LEFT.name, bg, FROZEN_DIVIDER, tinted && !isSel && tintCell, isSel ? cn(FROZEN_BODY_SEL, "group-hover/row:bg-[#d8e9fc]") : tinted ? tintHover : "group-hover/row:bg-[#f5f6f7] dark:group-hover/row:bg-white/5")}>
                           {inlineEditingId === a.id ? (
                             <div className="flex items-center gap-2"><Input value={inlineEditingName} onChange={e => setInlineEditingName(e.target.value)} onBlur={() => saveInlineRename(a.id)} onKeyDown={e => e.key === "Enter" && saveInlineRename(a.id)} className="h-7 text-xs py-1" autoFocus /></div>
                           ) : (
@@ -4468,6 +4548,7 @@ function AdsManagerContent() {
                               <div className="flex items-center gap-2">
                                 <button onClick={() => openWorkspaceEditor(a)} className="text-[#1877f2] hover:underline text-xs font-semibold text-left line-clamp-2">{a.name}</button>
                                 {hasDraft && <span className="shrink-0 rounded-full border border-emerald-300 bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300">Unpublished edits</span>}
+                                {justPublishedIds.has(a.id) && <span className="shrink-0 rounded-full border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">Just published</span>}
                                 <button onClick={e => { e.stopPropagation(); setInlineEditingId(a.id); setInlineEditingName(a.name) }} className="opacity-0 group-hover/cell:opacity-100 p-0.5 hover:bg-black/5 rounded transition-opacity"><IconPencil className="size-3 text-[#65676b]" /></button>
                               </div>
                               <div className="flex items-center gap-1.5 opacity-0 group-hover/cell:opacity-100 transition-opacity">
@@ -5280,10 +5361,9 @@ function AdsManagerContent() {
               OUTCOME_APP_PROMOTION: "App Promotion", OUTCOME_REACH: "Reach",
               LINK_CLICKS: "Link Clicks", CONVERSIONS: "Conversions",
             }
-            const BID_LABEL: Record<string, string> = {
-              LOWEST_COST_WITHOUT_CAP: "Lowest cost", LOWEST_COST_WITH_BID_CAP: "Bid cap",
-              COST_CAP: "Cost cap", MINIMUM_ROAS: "Min. ROAS",
-            }
+            // Shared with the create flow and the editor. The local copy this replaced keyed ROAS
+            // as MINIMUM_ROAS, which Graph never returns, so a ROAS ad set rendered its raw enum.
+            const BID_LABEL: Record<string, string> = BID_STRATEGY_LABEL
             const OPT_LABEL: Record<string, string> = {
               LINK_CLICKS: "Link clicks", IMPRESSIONS: "Impressions", REACH: "Reach",
               LANDING_PAGE_VIEWS: "Landing page views", CONVERSIONS: "Conversions",

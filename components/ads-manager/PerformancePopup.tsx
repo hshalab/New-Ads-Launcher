@@ -1492,6 +1492,9 @@ export function PerformancePopup({
                 onRefresh={() => setWorkspaceDetailRefresh(value => value + 1)}
                 onDraftChange={updateWorkspaceDraft}
                 accountId={accountId}
+                // TD-42: the ad set node carries no objective, so the editor cannot resolve its
+                // ODAX row without the parent campaign's.
+                campaignObjective={activeCampaign?.objective}
                 hierarchyPath={{
                   campaign: workspaceDrafts[`campaign:${activeCampaign?.id || ""}`]?.name || activeCampaign?.name,
                   adset: workspaceDrafts[`adset:${activeAdSet?.id || ""}`]?.name || activeAdSet?.name,

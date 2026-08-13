@@ -5,6 +5,7 @@ import {
   copyAdSet,
   getAdAccountPages,
   getBusinessManagers,
+  getCampaignForAttach,
   getPageInstagramAccounts,
   getPixels,
   getVideoThumbnail,
@@ -24,6 +25,19 @@ import {
   PUBLISHER_PLATFORMS,
   type PublisherPlatform,
 } from "@/lib/create-campaign-targeting"
+import {
+  isBidStrategy,
+  resolveBidding,
+  type BidStrategy,
+} from "@/lib/create-campaign-bidding"
+import {
+  buildDeliveryFields,
+  isCampaignObjective,
+  type CampaignObjective,
+  type ConversionLocation,
+  type EngagementType,
+  type PerformanceGoal,
+} from "@/lib/odax-matrix"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -31,9 +45,7 @@ export const dynamic = "force-dynamic"
 
 const GRAPH_API = "https://graph.facebook.com/v25.0"
 
-type CampaignObjective = "OUTCOME_SALES" | "OUTCOME_TRAFFIC" | "OUTCOME_AWARENESS"
 type SpecialAdCategory = "CREDIT" | "EMPLOYMENT" | "HOUSING" | "ISSUES_ELECTIONS_POLITICS"
-type PerformanceGoal = "OFFSITE_CONVERSIONS" | "LINK_CLICKS" | "LANDING_PAGE_VIEWS" | "REACH"
 type Gender = "ALL" | "MALE" | "FEMALE"
 type MediaType = "image" | "video"
 
@@ -70,17 +82,26 @@ const ZERO_DECIMAL_CURRENCIES = new Set([
 type DsaEntity = { type: "page" | "business"; id: string } | null
 
 interface CreateCampaignState {
+  /**
+   * Set = attach the new ad set to this campaign instead of creating one (Ads Manager's "New ad set
+   * or ad" scope). The campaign's own fields — name, objective, special ad categories, campaign
+   * budget — are then Meta's, not ours, and this route must not try to change them.
+   */
+  existingCampaignId: string
   campaignName: string
   objective: CampaignObjective
   specialAdCategories: SpecialAdCategory[]
   advantageCampaignBudget: boolean
   campaignBudget: string
   adSetName: string
-  conversionLocation: "website"
+  conversionLocation: ConversionLocation | null
+  engagementType: EngagementType | null
   performanceGoal: PerformanceGoal
   pixelId: string
   conversionEvent: string
+  campaignBidStrategy: BidStrategy
   costPerResultGoal: string
+  roasGoal: string
   attributionClickDays: "1" | "7"
   attributionViewDays: "0" | "1"
   attributionEngagedViewDays: "0" | "1"
@@ -214,28 +235,28 @@ function parseDsaEntity(value: unknown, label: string): DsaEntity {
 function parseState(rawState: unknown): CreateCampaignState {
   if (!isRecord(rawState)) fail(400, "Missing campaign state")
 
-  const objective = asString(rawState.objective) as CampaignObjective
-  if (!["OUTCOME_SALES", "OUTCOME_TRAFFIC", "OUTCOME_AWARENESS"].includes(objective)) {
-    fail(400, "This create flow supports Sales, Traffic, and Awareness campaigns only")
-  }
-
-  const performanceGoal = asString(rawState.performanceGoal) as PerformanceGoal
-  if (!["OFFSITE_CONVERSIONS", "LINK_CLICKS", "LANDING_PAGE_VIEWS", "REACH"].includes(performanceGoal)) {
-    fail(400, "Unsupported performance goal")
+  const objective = asString(rawState.objective)
+  if (!isCampaignObjective(objective)) {
+    fail(400, "This create flow supports Sales, Traffic, Engagement, and Awareness campaigns only")
   }
 
   const mediaType = asString(rawState.mediaType) as MediaType
   if (!["image", "video"].includes(mediaType)) fail(400, "Media type must be image or video")
 
-  const conversionLocation = asString(rawState.conversionLocation)
-  if (conversionLocation && conversionLocation !== "website") {
-    fail(400, "This create flow supports website campaigns only")
-  }
+  // The four ODAX links are read as posted and validated as one chain by `buildDeliveryFields`
+  // against the same table the UI generates its dropdowns from. They are deliberately NOT coerced
+  // here: silently substituting a different optimization goal would publish a campaign the user
+  // did not ask for. An off-matrix combination is a 400.
+  const conversionLocation = (asString(rawState.conversionLocation) || null) as ConversionLocation | null
+  const engagementType = (asString(rawState.engagementType) || null) as EngagementType | null
+  const performanceGoal = asString(rawState.performanceGoal) as PerformanceGoal
 
   const gender = asString(rawState.gender) as Gender
   if (!["ALL", "MALE", "FEMALE"].includes(gender)) fail(400, "Unsupported gender targeting")
-  const conversionEvent = asString(rawState.conversionEvent) || "PURCHASE"
-  if (!["PURCHASE", "ADD_TO_CART", "INITIATED_CHECKOUT", "LEAD", "COMPLETE_REGISTRATION", "VIEW_CONTENT"].includes(conversionEvent)) {
+  // Not defaulted: an objective that needs it is rejected by `buildDeliveryFields`, and one that
+  // does not never sends it. Defaulting here would pick the optimization event for the user.
+  const conversionEvent = asString(rawState.conversionEvent)
+  if (conversionEvent && !["PURCHASE", "ADD_TO_CART", "INITIATED_CHECKOUT", "LEAD", "COMPLETE_REGISTRATION", "VIEW_CONTENT"].includes(conversionEvent)) {
     fail(400, "Unsupported conversion event")
   }
   const attributionClickDays = rawState.attributionClickDays === "1" ? "1" : "7"
@@ -272,17 +293,23 @@ function parseState(rawState: unknown): CreateCampaignState {
     : []
 
   const state: CreateCampaignState = {
+    existingCampaignId: asString(rawState.existingCampaignId),
     campaignName: asString(rawState.campaignName),
     objective,
     specialAdCategories,
     advantageCampaignBudget: rawState.advantageCampaignBudget !== false,
     campaignBudget: asString(rawState.campaignBudget),
     adSetName: asString(rawState.adSetName),
-    conversionLocation: "website",
+    conversionLocation,
+    engagementType,
     performanceGoal,
     pixelId: asString(rawState.pixelId),
     conversionEvent,
+    campaignBidStrategy: isBidStrategy(rawState.campaignBidStrategy)
+      ? rawState.campaignBidStrategy
+      : "LOWEST_COST_WITHOUT_CAP",
     costPerResultGoal: asString(rawState.costPerResultGoal),
+    roasGoal: asString(rawState.roasGoal),
     attributionClickDays,
     attributionViewDays,
     attributionEngagedViewDays,
@@ -319,7 +346,8 @@ function parseState(rawState: unknown): CreateCampaignState {
   }
 
   if (!CTA_OPTIONS.has(state.callToAction)) fail(400, "Unsupported call to action")
-  if (!state.campaignName) fail(400, "Campaign name is required")
+  // On the attach branch the campaign already has a name, and it is Meta's, not ours.
+  if (!state.existingCampaignId && !state.campaignName) fail(400, "Campaign name is required")
   if (!state.adSetName) fail(400, "Ad set name is required")
   if (!state.adName) fail(400, "Ad name is required")
   if (!state.pageId) fail(400, "Facebook Page is required")
@@ -338,43 +366,47 @@ function parseState(rawState: unknown): CreateCampaignState {
 
   if (!hasCreative) parseHttpUrl(state.mediaUrl, "Media URL")
   parseHttpUrl(state.destinationUrl, "Website URL")
-  parseMoney(state.advantageCampaignBudget ? state.campaignBudget : state.dailyBudget, "Budget")
-  if (state.costPerResultGoal) parseMoney(state.costPerResultGoal, "Cost per result goal")
+  // Attach branch: the campaign's budget mode is Meta's, and a CBO campaign leaves nothing for the
+  // user to enter here. The budget that actually gets sent is validated once the real mode is
+  // known, in POST.
+  if (!state.existingCampaignId) {
+    parseMoney(state.advantageCampaignBudget ? state.campaignBudget : state.dailyBudget, "Budget")
+  } else if (state.dailyBudget) {
+    parseMoney(state.dailyBudget, "Ad set budget")
+  }
+  // Cap amount only needs format check when a cap strategy is active. Requiredness is enforced by
+  // resolveBidding after ODAX has produced the optimization_goal.
+  if (
+    (state.campaignBidStrategy === "COST_CAP" || state.campaignBidStrategy === "LOWEST_COST_WITH_BID_CAP") &&
+    state.costPerResultGoal
+  ) {
+    parseMoney(state.costPerResultGoal, "Cost per result goal")
+  }
 
   return state
 }
 
-function resolveDelivery(state: CreateCampaignState): {
-  optimizationGoal: PerformanceGoal
-  billingEvent: "IMPRESSIONS"
-  promotedObject?: Record<string, string>
-} {
-  if (state.objective === "OUTCOME_SALES") {
-    if (state.performanceGoal !== "OFFSITE_CONVERSIONS") {
-      fail(400, "Sales campaigns in this flow support website conversions only")
-    }
-    if (!state.pixelId) fail(400, "Pixel is required for Sales website conversion campaigns")
-    return {
-      optimizationGoal: "OFFSITE_CONVERSIONS",
-      billingEvent: "IMPRESSIONS",
-      promotedObject: { pixel_id: state.pixelId, custom_event_type: state.conversionEvent },
-    }
-  }
-
-  if (state.objective === "OUTCOME_TRAFFIC") {
-    if (state.performanceGoal !== "LINK_CLICKS" && state.performanceGoal !== "LANDING_PAGE_VIEWS") {
-      fail(400, "Traffic campaigns support Link Clicks or Landing Page Views")
-    }
-    return { optimizationGoal: state.performanceGoal, billingEvent: "IMPRESSIONS" }
-  }
-
-  if (state.objective === "OUTCOME_AWARENESS") {
-    if (state.performanceGoal !== "REACH") fail(400, "Awareness campaigns support Reach in this flow")
-    return { optimizationGoal: "REACH", billingEvent: "IMPRESSIONS" }
-  }
-
-  fail(400, "Unsupported objective")
-} 
+/**
+ * `optimization_goal`, `billing_event`, `destination_type` and `promoted_object` all follow from
+ * the ODAX chain, so they come from `lib/odax-matrix.ts` — the table the ad set form reads too.
+ * A hardcoded if-chain here is what let `destination_type: "WEBSITE"` be sent for every objective.
+ */
+function resolveDelivery(state: CreateCampaignState) {
+  const delivery = buildDeliveryFields({
+    objective: state.objective,
+    conversionLocation: state.conversionLocation,
+    engagementType: state.engagementType,
+    performanceGoal: state.performanceGoal,
+    pixelId: state.pixelId,
+    conversionEvent: state.conversionEvent,
+    pageId: state.pageId,
+    // hasCostCap drives ODAX billing_event selection. Only COST_CAP counts — Bid Cap and Highest
+    // volume do not flip the ODAX row even when a bid_amount is present.
+    hasCostCap: state.campaignBidStrategy === "COST_CAP",
+  })
+  if (typeof delivery === "string") fail(400, delivery)
+  return delivery
+}
 
 function mediaFileName(mediaUrl: string, mediaType: MediaType) {
   try {
@@ -588,9 +620,14 @@ async function assertPixelAllowed(adAccountId: string, token: string, state: Cre
   }
 }
 
-async function rollbackCampaign(campaignId: string, token: string) {
+/**
+ * Delete a Meta object this request created. Callers must pass an id they made themselves — the
+ * "New ad set or ad" scope attaches to a campaign the user already owns, and rolling that back
+ * would destroy live delivery.
+ */
+async function rollbackMetaObject(objectId: string, token: string) {
   try {
-    await fetch(`${GRAPH_API}/${campaignId}?access_token=${encodeURIComponent(token)}`, {
+    await fetch(`${GRAPH_API}/${objectId}?access_token=${encodeURIComponent(token)}`, {
       method: "DELETE",
     })
   } catch (err) {
@@ -748,6 +785,9 @@ async function createSingleMediaAd(
 }
 
 export async function POST(request: NextRequest) {
+  // Only ever a campaign **this request created**. The catch block DELETEs it, so an id that
+  // arrived from the client must never be assigned here — attaching to an existing campaign and
+  // then failing downstream would delete a live campaign the user did not ask us to touch.
   let campaignId: string | null = null
   let rollbackToken: string | null = null
 
@@ -793,15 +833,25 @@ export async function POST(request: NextRequest) {
     await assertPixelAllowed(adAccountId, token, state)
 
     const delivery = resolveDelivery(state)
-    const campaignBudget = state.advantageCampaignBudget
+    const campaignBudget = state.advantageCampaignBudget && !state.existingCampaignId
       ? campaignBudgetForHelper(state.campaignBudget, "Campaign budget", currency)
       : undefined
-    const adSetBudget = state.advantageCampaignBudget
+    // An empty daily budget only reaches here on the attach branch (parseState requires one on the
+    // create branch). Whether it is actually required is decided against the real campaign below.
+    const adSetBudget = state.advantageCampaignBudget || !state.dailyBudget
       ? undefined
       : budgetMinorUnits(state.dailyBudget, "Ad set budget", currency)
-    const costPerResultGoal = state.costPerResultGoal
-      ? budgetMinorUnits(state.costPerResultGoal, "Cost per result goal", currency)
-      : undefined
+    // Delivery first — bidding needs the resolved optimization_goal to gate MIN_ROAS.
+    const bidding = resolveBidding({
+      advantageCampaignBudget: state.advantageCampaignBudget,
+      existingCampaignId: state.existingCampaignId || undefined,
+      campaignBidStrategy: state.campaignBidStrategy,
+      costPerResultGoal: state.costPerResultGoal,
+      roasGoal: state.roasGoal,
+      optimizationGoal: delivery.optimizationGoal,
+      toMinorUnits: (value, label) => budgetMinorUnits(value, label, currency),
+      fail,
+    })
     const attributionSpec = buildAttributionSpec(state)
 
     const accountTimeZone = account.timezoneName || "UTC"
@@ -816,15 +866,51 @@ export async function POST(request: NextRequest) {
       fail(400, "End date must be after start date")
     }
 
-    const campaign = await createCampaign(adAccountId, token, {
-      name: state.campaignName,
-      objective: state.objective,
-      special_ad_categories: state.specialAdCategories,
-      status: "PAUSED",
-      daily_budget: campaignBudget,
-      bid_strategy: campaignBudget ? "LOWEST_COST_WITHOUT_CAP" : undefined,
-    }, tokenOpts)
-    campaignId = campaign.id
+    // ── Scope: attach to an existing campaign, or create one ─────────────────
+    // Ads Manager's "New ad set or ad" scope. The campaign's own fields — name, objective, special
+    // ad categories, budget mode — belong to Meta on this branch, so we read them and conform to
+    // them rather than sending our own.
+    let campaign: { id: string }
+    let effectiveAdSetBudget = adSetBudget
+
+    if (state.existingCampaignId) {
+      const existing = await getCampaignForAttach(state.existingCampaignId, token, tokenOpts)
+
+      // Tenancy: the campaign must live in the ad account this request is scoped to. Without this
+      // any campaign id the caller can produce would accept an ad set.
+      if (withActPrefix(String(existing.account_id || "")) !== adAccountId) {
+        fail(400, "That campaign belongs to a different ad account")
+      }
+
+      // Meta validates the objective → destination_type → promoted_object chain at *ad set*
+      // creation, not campaign creation. A mismatch here is Meta error 100 after the fact, which
+      // is the failure the entry gates exist to make unreachable.
+      if (existing.objective !== state.objective) {
+        fail(400, `"${existing.name}" runs the ${existing.objective} objective. Choose that objective, or create a new campaign.`)
+      }
+
+      // CBO campaigns own the budget; their ad sets must not carry one. ABO campaigns are the
+      // reverse — an ad set with no budget under an ABO campaign never spends.
+      const campaignOwnsBudget = Boolean(existing.daily_budget || existing.lifetime_budget)
+      if (campaignOwnsBudget) {
+        effectiveAdSetBudget = undefined
+      } else if (!effectiveAdSetBudget) {
+        fail(400, `"${existing.name}" has no campaign budget, so this ad set needs a daily budget.`)
+      }
+
+      campaign = { id: existing.id }
+    } else {
+      campaign = await createCampaign(adAccountId, token, {
+        name: state.campaignName,
+        objective: state.objective,
+        special_ad_categories: state.specialAdCategories,
+        status: "PAUSED",
+        daily_budget: campaignBudget,
+        bid_strategy: campaignBudget ? bidding.campaignBidStrategy : undefined,
+      }, tokenOpts)
+      // Rollback owns only what this request created.
+      campaignId = campaign.id
+    }
 
     const adSet = await createAdSet(adAccountId, token, {
       name: state.adSetName,
@@ -832,12 +918,13 @@ export async function POST(request: NextRequest) {
       targeting: buildTargeting(state),
       optimization_goal: delivery.optimizationGoal,
       billing_event: delivery.billingEvent,
-      bid_amount: costPerResultGoal,
-      daily_budget: adSetBudget,
-      bid_strategy: costPerResultGoal ? "COST_CAP" : adSetBudget ? "LOWEST_COST_WITHOUT_CAP" : undefined,
+      bid_amount: bidding.bidAmount,
+      bid_constraints: bidding.bidConstraints,
+      daily_budget: effectiveAdSetBudget,
+      bid_strategy: bidding.adSetBidStrategy,
       status: "PAUSED",
       start_time: startTime,
-      destination_type: "WEBSITE",
+      destination_type: delivery.destinationType,
       promoted_object: delivery.promotedObject,
       attribution_spec: attributionSpec,
       // Ad transparency. Publicly visible in the Meta Ad Library; omitted when unset so the
@@ -894,9 +981,12 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // Zero successes → roll back the whole campaign so the user isn't left with an empty shell.
+      // Zero successes → roll back the empty shell. Only what this request created: a campaign we
+      // made takes its ad sets with it, but on the attach branch the campaign is the user's, so we
+      // delete the ad sets (and any copies) instead.
       if (created.length === 0) {
-        await rollbackCampaign(campaign.id, token)
+        if (campaignId) await rollbackMetaObject(campaignId, token)
+        else for (const id of actualAdSetIds) await rollbackMetaObject(id, token)
         return NextResponse.json({
           success: false,
           campaignId: null,
@@ -934,6 +1024,11 @@ export async function POST(request: NextRequest) {
         success: true,
         campaignId: campaign.id,
         adSetId: adSet.id,
+        // Every ad set this request produced, not just the first — `oneAdPerAdset` makes copies, and
+        // the table has to be able to point at all of them. `attached` says whether campaignId is
+        // something we made or something that was already running.
+        adSetIds: actualAdSetIds,
+        attached: Boolean(state.existingCampaignId),
         createdAds: created,
         errors,
         batchStatus,
@@ -989,11 +1084,13 @@ export async function POST(request: NextRequest) {
       success: true,
       campaignId: campaign.id,
       adSetId: adSet.id,
+      adSetIds: [adSet.id],
+      attached: Boolean(state.existingCampaignId),
       adId: ad.id,
       batchId: batch?.id || null,
     })
   } catch (err) {
-    if (campaignId && rollbackToken) await rollbackCampaign(campaignId, rollbackToken)
+    if (campaignId && rollbackToken) await rollbackMetaObject(campaignId, rollbackToken)
 
     const status = err instanceof HttpError ? err.status : 500
     const message = err instanceof Error ? err.message : "Failed to create campaign"

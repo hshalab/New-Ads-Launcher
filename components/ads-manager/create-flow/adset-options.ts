@@ -1,4 +1,6 @@
-import { PerformanceGoal, CampaignObjective } from "./types"
+// Performance-goal options used to live here as an if-chain on the objective. They now come from
+// `lib/odax-matrix.ts`, which the create-campaign route reads too — one table, not two lists that
+// can drift apart.
 
 export const COUNTRIES = [
   { name: "Vietnam", code: "VN" },
@@ -34,19 +36,3 @@ export const ZERO_DECIMAL_CURRENCIES = new Set([
   "XOF",
   "XPF",
 ])
-
-export function performanceOptions(objective: CampaignObjective): Array<{
-  value: PerformanceGoal
-  label: string
-}> {
-  if (objective === "OUTCOME_SALES") {
-    return [{ value: "OFFSITE_CONVERSIONS", label: "Maximize website conversions" }]
-  }
-  if (objective === "OUTCOME_TRAFFIC") {
-    return [
-      { value: "LINK_CLICKS", label: "Maximize link clicks" },
-      { value: "LANDING_PAGE_VIEWS", label: "Maximize landing page views" },
-    ]
-  }
-  return [{ value: "REACH", label: "Maximize reach" }]
-}

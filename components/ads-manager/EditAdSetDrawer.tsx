@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
+import { resolveOdaxRow } from "@/lib/odax-matrix"
 import { cn } from "@/lib/utils"
 import {
   AdvertiserEntity,
@@ -143,7 +144,11 @@ function stateToReview(state: CampaignFormState, status: AdSetStatus, currency: 
     { label: "Status", value: status === "ACTIVE" ? "Active" : "Paused" },
     {
       label: "Conversion location",
-      value: state.conversionLocation === "website" ? "Website" : state.conversionLocation,
+      // Awareness ad sets have no conversion location at all, so the label comes from the ODAX
+      // table rather than a string comparison that would render an empty cell for null.
+      value:
+        resolveOdaxRow(state.objective, state.conversionLocation, state.engagementType)
+          ?.conversionLocationLabel || "—",
     },
     { label: "Performance goal", value: perfGoalLabel(state.performanceGoal) },
     { label: "Budget", value: budgetLabel },
