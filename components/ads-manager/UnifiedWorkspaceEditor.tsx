@@ -619,6 +619,40 @@ export function UnifiedWorkspaceEditor({
   const hasLifetimeBudget = draft?.lifetime_budget != null && draft?.lifetime_budget !== ""
   const budgetCents = Number.parseInt(draft?.daily_budget || draft?.lifetime_budget || "0")
 
+  // Keep hooks before loading guards; soft navigation otherwise changes hook order.
+  const estimateTargeting: TargetingInput = useMemo(
+    () => ({
+      locations: draft?.targeting?.geo_locations?.countries || [],
+      ageMin: draft?.targeting?.age_min || 18,
+      ageMax: draft?.targeting?.age_max || 65,
+      gender:
+        draft?.targeting?.genders?.[0] === 1
+          ? "MALE"
+          : draft?.targeting?.genders?.[0] === 2
+            ? "FEMALE"
+            : "ALL",
+      placementMode: (draft?.targeting?.publisher_platforms?.length || 0) > 0 ? "manual" : "advantage",
+      publisherPlatforms: (draft?.targeting?.publisher_platforms || []) as TargetingInput["publisherPlatforms"],
+      // Meta returns audience expansion on read as `targeting_optimization`, while the create path
+      // writes `targeting_automation.advantage_audience`. Same switch, two field names.
+      targetingExpansion: draft?.targeting?.targeting_optimization === "expansion_all",
+    }),
+    [draft?.targeting]
+  )
+
+  const adSetRecommendations = useMemo<AdSetRecommendation[]>(() => {
+    if (level !== "adset" || !draft) return []
+    return buildAdSetRecommendations({
+      hasLocation: hasAnyLocation(draft.targeting?.geo_locations),
+      optimizationGoal: draft.optimization_goal || "",
+      pixelId: draft.promoted_object?.pixel_id,
+      publisherPlatformCount: draft.targeting?.publisher_platforms?.length || 0,
+      targetingExpansion: draft.targeting?.targeting_optimization === "expansion_all",
+      ageMin: draft.targeting?.age_min || 18,
+      ageMax: draft.targeting?.age_max || 65,
+    })
+  }, [level, draft])
+
   if (loading && !draft) {
     return (
       <div className="flex h-full items-center justify-center p-8">
@@ -759,46 +793,6 @@ export function UnifiedWorkspaceEditor({
   // The right rail: ad preview at the ad level, Meta's audience estimate + our checks at the ad
   // set. The campaign level has neither — there is no targeting there to estimate.
   const hasRail = level === "ad" || level === "adset"
-
-  // Mapped to the same TargetingInput `buildTargeting` and the create route take, so the estimate
-  // is computed from the targeting Meta would actually receive, not an approximation of it.
-  const estimateTargeting: TargetingInput = useMemo(
-    () => ({
-      locations: draft.targeting?.geo_locations?.countries || [],
-      ageMin: draft.targeting?.age_min || 18,
-      ageMax: draft.targeting?.age_max || 65,
-      gender:
-        draft.targeting?.genders?.[0] === 1
-          ? "MALE"
-          : draft.targeting?.genders?.[0] === 2
-            ? "FEMALE"
-            : "ALL",
-      placementMode: (draft.targeting?.publisher_platforms?.length || 0) > 0 ? "manual" : "advantage",
-      publisherPlatforms: (draft.targeting?.publisher_platforms || []) as TargetingInput["publisherPlatforms"],
-      // Meta returns audience expansion on read as `targeting_optimization`, while the create path
-      // writes `targeting_automation.advantage_audience`. Same switch, two field names.
-      targetingExpansion: draft.targeting?.targeting_optimization === "expansion_all",
-    }),
-    [draft.targeting]
-  )
-
-  // Checks against the saved ad set, not against a create form. The checks themselves live in
-  // lib/adset-recommendations.ts so the create flow fires exactly the same ones — the score there
-  // must not change when the ad set is saved without anything about it changing. Only the mapping
-  // out of Meta's draft shape is local, because `geo_locations` here can carry cities and regions
-  // that the create form has no equivalent for.
-  const adSetRecommendations = useMemo<AdSetRecommendation[]>(() => {
-    if (level !== "adset") return []
-    return buildAdSetRecommendations({
-      hasLocation: hasAnyLocation(draft.targeting?.geo_locations),
-      optimizationGoal: draft.optimization_goal || "",
-      pixelId: draft.promoted_object?.pixel_id,
-      publisherPlatformCount: draft.targeting?.publisher_platforms?.length || 0,
-      targetingExpansion: draft.targeting?.targeting_optimization === "expansion_all",
-      ageMin: draft.targeting?.age_min || 18,
-      ageMax: draft.targeting?.age_max || 65,
-    })
-  }, [level, draft.targeting, draft.optimization_goal, draft.promoted_object])
 
   const copyId = async () => {
     try {

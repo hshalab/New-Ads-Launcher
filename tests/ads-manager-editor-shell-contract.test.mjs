@@ -130,8 +130,12 @@ describe("Ads Manager editor shell + MECE contract (BL-39 B8)", () => {
     // A different targeting object would make the number a confident lie about a different
     // audience, so the rail maps the draft into the same TargetingInput the create route uses.
     assert.match(editor, /const estimateTargeting: TargetingInput/)
-    assert.match(editor, /locations: draft\.targeting\?\.geo_locations\?\.countries \|\| \[\]/)
+    assert.match(editor, /locations: draft\?\.targeting\?\.geo_locations\?\.countries \|\| \[\]/)
     assert.match(editor, /optimizationGoal=\{draft\.optimization_goal \|\| ""\}/)
+    assert.ok(editor.indexOf("const estimateTargeting") < editor.indexOf("if (loading && !draft)"))
+    assert.ok(editor.indexOf("const adSetRecommendations") < editor.indexOf("if (loading && !draft)"))
+    assert.ok(editor.indexOf("const estimateTargeting") < editor.indexOf("if (level === \"ad\" && !readOnly && pagesLoading"))
+    assert.ok(editor.indexOf("const adSetRecommendations") < editor.indexOf("if (level === \"ad\" && !readOnly && pagesLoading"))
   })
 
   it("does not render deferred-surface prose banners", () => {
