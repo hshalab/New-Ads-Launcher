@@ -1,0 +1,66 @@
+name: CI
+
+# Cổng chất lượng tối thiểu, chạy trước khi Mac mini build production.
+# Không chạy Playwright ở đây — e2e cần Meta/Supabase thật (và repo hiện chưa có
+# playwright.config), sẽ flaky và làm mất niềm tin vào CI.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEXT_TELEMETRY_DISABLED: '1'
+  # launch/page.tsx ~16k dòng: eslint và next build đều OOM ở heap mặc định.
+  NODE_OPTIONS: --max-old-space-size=8192
+
+jobs:
+  verify:
+    name: Typecheck · Lint · Build (blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+        env:
+          # Placeholder build-time — CI chỉ kiểm tra build compile được, không gọi
+          # service thật. Giá trị thật nằm trong .env trên Mac mini.
+          CUSTOM_AUTH_SECRET: ci-placeholder-not-used-at-runtime
+
+  contract-tests:
+    name: Contract tests (non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # 20/372 test đang đỏ sẵn trên main tại thời điểm dựng CI (2026-08-13).
+    # Để non-blocking cho tới khi dọn xong, nếu không CI đỏ thường trực và mất
+    # tác dụng cảnh báo. Khi về 0 fail thì bỏ dòng continue-on-error này.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      # Chỉ .mjs — .ts/.mts trong tests/ cần type-stripping, Node 20 chưa chạy được.
+      - run: node --test tests/*.test.mjs
