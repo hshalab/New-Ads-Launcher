@@ -12,8 +12,11 @@ describe("Duplicate ad cross-campaign destination contract", () => {
     assert.match(page, /duplicateAdSetOptions/)
     assert.match(page, /\/api\/facebook\/adsets\?ad_account_id=\$\{encodeURIComponent\(selectedAccountId\)\}&date_preset=last_7d/)
     assert.match(page, /adSet\.status === "ACTIVE" \|\| adSet\.status === "PAUSED"/)
-    assert.match(page, /availableDuplicateAdSetOptions\.map/)
+    assert.match(page, /filteredDuplicateAdSetOptions\.map/)
+    assert.match(page, /role="listbox" className="max-h-60 overflow-y-auto/)
+    assert.match(page, /placeholder="Search campaign or ad set"/)
     assert.doesNotMatch(page, /\{adSets\.map\(adSet => <option key=\{adSet\.id\} value=\{adSet\.id\}>\{adSet\.name\}<\/option>\)\}/)
+    assert.doesNotMatch(page, /<select[^>]*id="duplicate-target-adset"/)
   })
 
   it("keeps the existing ownership-checked target_adset_id write seam", () => {

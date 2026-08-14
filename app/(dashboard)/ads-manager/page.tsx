@@ -1226,6 +1226,8 @@ function AdsManagerContent() {
   const [duplicateAdSetOptionsAccountId, setDuplicateAdSetOptionsAccountId] = useState("")
   const [duplicateAdSetOptionsLoading, setDuplicateAdSetOptionsLoading] = useState(false)
   const [duplicateAdSetOptionsError, setDuplicateAdSetOptionsError] = useState("")
+  const [duplicateAdSetPickerOpen, setDuplicateAdSetPickerOpen] = useState(false)
+  const [duplicateAdSetSearch, setDuplicateAdSetSearch] = useState("")
   const [duplicateNewName, setDuplicateNewName] = useState("")
   const [duplicateRec1, setDuplicateRec1] = useState(false)
   const [duplicateRec2, setDuplicateRec2] = useState(false)
@@ -1275,6 +1277,8 @@ function AdsManagerContent() {
     setDuplicateAdSetOptions([])
     setDuplicateAdSetOptionsAccountId("")
     setDuplicateAdSetOptionsError("")
+    setDuplicateAdSetPickerOpen(false)
+    setDuplicateAdSetSearch("")
     if (!selectedAccountId) {
       setFiltersHydratedAccount("")
       return
@@ -1363,6 +1367,8 @@ function AdsManagerContent() {
     setDuplicateStatusActive(false)
     setDuplicateRec1(false)
     setDuplicateRec2(false)
+    setDuplicateAdSetPickerOpen(false)
+    setDuplicateAdSetSearch("")
   }, [tab])
   useEffect(() => {
     if (!duplicateDialogOpen || tab !== "ads" || duplicateDestination !== "existing" || !selectedAccountId) return
@@ -1989,6 +1995,14 @@ function AdsManagerContent() {
   const availableDuplicateAdSetOptions = duplicateAdSetOptions
     .filter(adSet => (adSet.status === "ACTIVE" || adSet.status === "PAUSED") && !sourceAdSetIds.has(adSet.id))
     .sort((a, b) => (a.campaign_name || "").localeCompare(b.campaign_name || "") || a.name.localeCompare(b.name))
+  const duplicateAdSetSearchTerm = duplicateAdSetSearch.trim().toLowerCase()
+  const filteredDuplicateAdSetOptions = duplicateAdSetSearchTerm
+    ? availableDuplicateAdSetOptions.filter(adSet =>
+        adSet.name.toLowerCase().includes(duplicateAdSetSearchTerm)
+        || (adSet.campaign_name || "").toLowerCase().includes(duplicateAdSetSearchTerm)
+      )
+    : availableDuplicateAdSetOptions
+  const selectedDuplicateAdSet = duplicateAdSetOptions.find(adSet => adSet.id === duplicateTargetId)
 
   const openDuplicatePublishConfirm = () => {
     if (!canDuplicate || isDuplicating) return
@@ -4693,6 +4707,10 @@ function AdsManagerContent() {
         onOpenChange={open => {
           setDuplicateDialogOpen(open)
           if (open) setDuplicateStep(tab === "campaigns" ? 2 : 1)
+          else {
+            setDuplicateAdSetPickerOpen(false)
+            setDuplicateAdSetSearch("")
+          }
         }}
       >
         <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-[640px]">
@@ -4857,24 +4875,71 @@ function AdsManagerContent() {
                 {tab === "ads" && duplicateDestination === "existing" && (
                   <section className="space-y-2">
                     <Label htmlFor="duplicate-target-adset" className="text-sm font-semibold">Search ad set</Label>
-                    <div className="relative">
-                      <IconSearch className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" strokeWidth={1.8} />
-                      <select
-                        id="duplicate-target-adset"
-                        value={duplicateTargetId}
-                        onChange={e => setDuplicateTargetId(e.target.value)}
-                        className="h-10 w-full appearance-none rounded-lg border border-input bg-background pl-9 pr-3 text-sm"
+                    <button
+                      type="button"
+                      id="duplicate-target-adset"
+                      aria-expanded={duplicateAdSetPickerOpen}
+                      aria-controls="duplicate-target-adset-options"
+                      onClick={() => setDuplicateAdSetPickerOpen(open => !open)}
+                      className="flex h-10 w-full items-center justify-between gap-3 rounded-lg border border-input bg-background px-3 text-left text-sm"
+                    >
+                      <span className={cn("truncate", !selectedDuplicateAdSet && "text-muted-foreground")}>
+                        {duplicateAdSetOptionsLoading
+                          ? "Loading ad sets..."
+                          : selectedDuplicateAdSet
+                            ? `${selectedDuplicateAdSet.campaign_name ? `${selectedDuplicateAdSet.campaign_name} / ` : ""}${selectedDuplicateAdSet.name}`
+                            : "Select ad set"}
+                      </span>
+                      <IconChevronDown className={cn("size-4 shrink-0 text-muted-foreground transition-transform", duplicateAdSetPickerOpen && "rotate-180")} />
+                    </button>
+
+                    {duplicateAdSetPickerOpen && (
+                      <div
+                        id="duplicate-target-adset-options"
+                        className="overflow-hidden rounded-lg border border-input bg-background shadow-sm"
                       >
-                        <option value="">{duplicateAdSetOptionsLoading ? "Loading ad sets..." : "Select ad set"}</option>
-                        {availableDuplicateAdSetOptions.map(adSet => (
-                          <option key={adSet.id} value={adSet.id}>
-                            {adSet.campaign_name ? `${adSet.campaign_name} / ` : ""}{adSet.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    {duplicateAdSetOptionsError && (
-                      <p className="text-xs text-destructive">{duplicateAdSetOptionsError}. Close and reopen to retry.</p>
+                        <div className="relative border-b p-2">
+                          <IconSearch className="pointer-events-none absolute left-5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" strokeWidth={1.8} />
+                          <Input
+                            autoFocus
+                            value={duplicateAdSetSearch}
+                            onChange={event => setDuplicateAdSetSearch(event.target.value)}
+                            placeholder="Search campaign or ad set"
+                            className="h-9 pl-9"
+                          />
+                        </div>
+                        <div role="listbox" className="max-h-60 overflow-y-auto p-1">
+                          {duplicateAdSetOptionsLoading ? (
+                            <div className="px-3 py-6 text-center text-sm text-muted-foreground">Loading ad sets...</div>
+                          ) : duplicateAdSetOptionsError ? (
+                            <div className="px-3 py-6 text-center text-sm text-destructive">{duplicateAdSetOptionsError}. Close and reopen to retry.</div>
+                          ) : filteredDuplicateAdSetOptions.length === 0 ? (
+                            <div className="px-3 py-6 text-center text-sm text-muted-foreground">No eligible ad sets found.</div>
+                          ) : filteredDuplicateAdSetOptions.map(adSet => (
+                            <button
+                              key={adSet.id}
+                              type="button"
+                              role="option"
+                              aria-selected={duplicateTargetId === adSet.id}
+                              onClick={() => {
+                                setDuplicateTargetId(adSet.id)
+                                setDuplicateAdSetPickerOpen(false)
+                                setDuplicateAdSetSearch("")
+                              }}
+                              className={cn(
+                                "flex w-full items-start justify-between gap-3 rounded-md px-3 py-2 text-left hover:bg-muted",
+                                duplicateTargetId === adSet.id && "bg-[#e7f3ff] dark:bg-blue-950/40",
+                              )}
+                            >
+                              <span className="min-w-0">
+                                <span className="block truncate text-sm font-medium">{adSet.name}</span>
+                                <span className="block truncate text-xs text-muted-foreground">{adSet.campaign_name || "Campaign unavailable"}</span>
+                              </span>
+                              {duplicateTargetId === adSet.id && <IconCheck className="mt-0.5 size-4 shrink-0 text-[#1877f2]" />}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     )}
                   </section>
                 )}
