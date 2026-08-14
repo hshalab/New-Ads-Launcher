@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { getAuthContext, getConnectionForAdAccount, isManual, MissingViaError, requireRole } from "@/lib/auth"
 import { assertLaunchable } from "@/lib/creative-readiness"
 import { createAdminClient } from "@/lib/supabase/admin"
-import { getAdDetails, createCampaign, createAdSet, copyAdSet, createAd, getVideoThumbnail, getResourceAccountId } from "@/lib/facebook"
+import { getAdDetails, createCampaign, createAdSet, copyAdSet, createAd, getVideoThumbnail, getResourceAccountId, isFreshThumbnailUrl } from "@/lib/facebook"
 import { adAccountBelongsToOrg, normalizeAdAccountId } from "../_utils"
 import { notifyLaunchOutcome } from "@/lib/notifications/launch"
 import { invalidateMetaReadCacheAfterWrite } from "../_db-cache"
@@ -192,9 +192,12 @@ async function createAdsInAdset(
 
     let thumbnailUrl: string | undefined = creative.fb_thumbnail_url || undefined
     try {
-      // Facebook v25 requires image_url in video_data — fetch thumbnail if not stored
-      if (creative.fb_video_id && !thumbnailUrl) {
+      // Facebook v25 requires a current image_url in video_data.
+      if (creative.fb_video_id && !isFreshThumbnailUrl(thumbnailUrl)) {
         thumbnailUrl = (await getVideoThumbnail(creative.fb_video_id, token, { skipProof: tokenOpts?.isManual })) || undefined
+        if (thumbnailUrl) {
+          await supabase.from("creatives").update({ fb_thumbnail_url: thumbnailUrl }).eq("id", creative.id)
+        }
       }
     } catch (err: any) {
       errors.push({ creativeId: creative.id, error: `Thumbnail fetch failed: ${err.message}` })

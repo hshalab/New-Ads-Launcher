@@ -4,7 +4,7 @@ import { invalidateMetaReadCacheAfterWrite } from "../_db-cache"
 import { getAuthContext, getConnectionForAdAccount, isManual, MissingViaError, requireRole } from "@/lib/auth"
 import { isLaunchable } from "@/lib/creative-readiness"
 import { createAdminClient } from "@/lib/supabase/admin"
-import { createAd, getVideoThumbnail, getResourceAccountId, getAdSetCampaignsAndNames, copyAdSet, pollVideoReady } from "@/lib/facebook"
+import { createAd, getVideoThumbnail, getResourceAccountId, getAdSetCampaignsAndNames, copyAdSet, pollVideoReady, isFreshThumbnailUrl } from "@/lib/facebook"
 import { adAccountBelongsToOrg, normalizeAdAccountId } from "@/app/api/facebook/_utils"
 
 // Table Mode batch launch: accepts all rows in one request.
@@ -206,9 +206,8 @@ export async function POST(request: NextRequest) {
           }
 
           let thumbnailUrl: string | undefined
-          const isMetaCdn = (u?: string | null) => !!u && /(fbcdn\.net|facebook\.com)/.test(u)
           if (creative.fb_video_id) {
-            if (isMetaCdn(creative.fb_thumbnail_url)) {
+            if (isFreshThumbnailUrl(creative.fb_thumbnail_url)) {
               thumbnailUrl = creative.fb_thumbnail_url
             } else {
               thumbnailUrl = (await getVideoThumbnail(creative.fb_video_id, token, { skipProof: tokenOpts.isManual })) || undefined

@@ -707,11 +707,14 @@ async function execLaunchAdAction(
   }
 
   // Import createAd from lib/facebook
-  const { createAd, getVideoThumbnail } = await import("@/lib/facebook")
+  const { createAd, getVideoThumbnail, isFreshThumbnailUrl } = await import("@/lib/facebook")
 
-  // Get thumbnail for video if missing
-  if (fbVideoId && !fbThumbnailUrl) {
+  // Refresh missing or expired Meta CDN thumbnails before createAd's write gate.
+  if (fbVideoId && !isFreshThumbnailUrl(fbThumbnailUrl)) {
     fbThumbnailUrl = (await getVideoThumbnail(fbVideoId, token)) || undefined
+    if (fbThumbnailUrl && payload.fileId) {
+      await createAdminClient().from("creatives").update({ fb_thumbnail_url: fbThumbnailUrl }).eq("id", payload.fileId)
+    }
   }
 
   // Launch into each target ad set

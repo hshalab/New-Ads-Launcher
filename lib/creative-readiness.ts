@@ -40,11 +40,16 @@ export function isLaunchable(c: {
 }
 
 export class CreativeNotReadyError extends Error {
-  constructor(public readonly creative: LaunchableCreative) {
+  // Declared explicitly rather than as a constructor parameter property: `node --experimental-
+  // strip-types` (how tests/*.test.mjs import lib/) cannot compile parameter properties.
+  readonly creative: LaunchableCreative
+
+  constructor(creative: LaunchableCreative) {
     super(
       `Creative "${creative.file_name ?? creative.id}" not yet uploaded to Meta. ` +
       `Open Ads Manager and upload it before launching.`,
     )
+    this.creative = creative
     this.name = "CreativeNotReadyError"
   }
 }
