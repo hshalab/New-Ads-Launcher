@@ -440,8 +440,13 @@ export interface CampaignInsight {
   date_stop: string
 }
 
-/** Shared insights subfields for Ads Manager ECOM columns. */
-const ADS_MANAGER_INSIGHT_FIELDS = [
+/**
+ * Shared insights subfields for Ads Manager ECOM columns.
+ * Exported because breakdown rows are scored by the same metric resolver as the
+ * parent rows they sit under — request a shorter list there and the sub-rows
+ * render 0 for every column the resolver can't find.
+ */
+export const ADS_MANAGER_INSIGHT_FIELDS = [
   "spend", "impressions", "clicks", "reach", "frequency", "cpm", "ctr",
   "inline_link_clicks", "unique_clicks", "unique_inline_link_clicks", "unique_link_clicks_ctr",
   "actions", "action_values", "cost_per_action_type",

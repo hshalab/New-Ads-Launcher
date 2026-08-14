@@ -25,6 +25,7 @@ const OBJECT_LABEL: Record<ObjectType, string> = {
   painpoint: "Weekly painpoint",
   fallback: "Meta Ads Manager fallback",
   report: "Tracking report",
+  app_status: "App status tab",
   facebook_connection: "Facebook connection",
   organization: "Organization",
 }

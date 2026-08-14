@@ -84,7 +84,9 @@ const Tip = ({ text, children, className }: { text: string; children: ReactNode;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface AdSet { id: string; name: string; status: string; effective_status: string; campaign_id: string; campaign_name?: string; daily_budget?: string }
+// `insights` rides along from /api/facebook/adsets (getAdSets requests it with
+// the ad set fields) — the window is the route's date_preset, last_7d by default.
+interface AdSet { id: string; name: string; status: string; effective_status: string; campaign_id: string; campaign_name?: string; daily_budget?: string; insights?: { data?: { spend?: string }[] } }
 interface IgAccount { id: string; username?: string; profile_pic?: string }
 interface FacebookPage { id: string; name: string; picture?: { data: { url: string } }; instagram_accounts?: { data: IgAccount[] } }
 interface AdAccountItem { id: string; name: string; account_id?: string }
@@ -4483,6 +4485,34 @@ function ScheduleModal({ open, onClose, onConfirm }: {
 
 // ─── Duplicate Ad Set Modal ───────────────────────────────────────────────────
 
+/**
+ * The longest opening these names all share, cut back to a separator.
+ *
+ * Campaign names here come from templates, so a dozen can begin with the same
+ * "PATI | Q3 | VN |" and differ only near the end — exactly the half that
+ * truncation eats. Dimming the shared opening leaves the differing part as the
+ * only thing with contrast. Returns "" when there is nothing worth dimming.
+ */
+function sharedNamePrefix(names: string[]): string {
+  if (names.length < 2) return ""
+  let prefix = names[0]
+  for (const name of names.slice(1)) {
+    let i = 0
+    while (i < prefix.length && i < name.length && prefix[i] === name[i]) i++
+    prefix = prefix.slice(0, i)
+    if (!prefix) return ""
+  }
+  // Never split a word: fall back to the last separator inside the prefix.
+  const cut = Math.max(
+    prefix.lastIndexOf(" "), prefix.lastIndexOf("-"), prefix.lastIndexOf("|"),
+    prefix.lastIndexOf("_"), prefix.lastIndexOf("/"), prefix.lastIndexOf("–"),
+  )
+  prefix = cut > 0 ? prefix.slice(0, cut + 1) : ""
+  if (prefix.length < 6) return ""
+  // A name that is entirely prefix would render as all-dimmed and read as empty.
+  return names.some(name => name.length <= prefix.length) ? "" : prefix
+}
+
 function DuplicateAdSetModal({
   adAccountId, open, onClose, allAdSets, onDuplicated,
 }: {
@@ -4567,9 +4597,34 @@ function DuplicateAdSetModal({
   useEffect(() => { setDetail(null) }, [selectedSourceId])
 
   const sourceAdSet = allAdSets.find(a => a.id === selectedSourceId)
+  // Ad set names repeat across campaigns, so the campaign name has to be
+  // searchable too — otherwise typing a name you can see gives back rows you
+  // still can't tell apart.
   const filtered = allAdSets.filter(a =>
-    !search || a.name.toLowerCase().includes(search.toLowerCase()) || a.id.includes(search)
+    !search
+    || a.name.toLowerCase().includes(search.toLowerCase())
+    || (a.campaign_name || "").toLowerCase().includes(search.toLowerCase())
+    || a.id.includes(search)
   )
+
+  // Campaign is printed once per group instead of once per row, which buys the
+  // room to show it whole — two ad sets sharing a name now sit under visibly
+  // different headers rather than under two identical truncated lines.
+  const adSetSpend = (a: AdSet) => Number(a.insights?.data?.[0]?.spend || 0)
+  const campaignGroups = (() => {
+    const groups = new Map<string, { campaignId: string; campaignName: string; adSets: AdSet[]; spend: number }>()
+    for (const a of filtered) {
+      const key = a.campaign_id || "unknown"
+      const group = groups.get(key) ?? { campaignId: key, campaignName: a.campaign_name || "Campaign unavailable", adSets: [], spend: 0 }
+      group.adSets.push(a)
+      group.spend += adSetSpend(a)
+      groups.set(key, group)
+    }
+    const list = [...groups.values()]
+    for (const group of list) group.adSets.sort((x, y) => adSetSpend(y) - adSetSpend(x))
+    return list.sort((x, y) => y.spend - x.spend)
+  })()
+  const campaignPrefix = sharedNamePrefix(campaignGroups.map(group => group.campaignName))
 
   const selectSource = (a: AdSet) => {
     setSelectedSourceId(a.id)
@@ -4677,7 +4732,7 @@ function DuplicateAdSetModal({
                       value={search}
                       onChange={e => { setSearch(e.target.value); setSearchOpen(true) }}
                       onFocus={() => setSearchOpen(true)}
-                      placeholder="Search by Ad Set name or ID"
+                      placeholder="Search by Ad Set name, campaign or ID"
                       className="flex-1 bg-transparent outline-none text-sm"
                     />
                   )}
@@ -4693,31 +4748,66 @@ function DuplicateAdSetModal({
                 sideOffset={4}
                 onOpenAutoFocus={e => e.preventDefault()}
                 onWheel={e => e.stopPropagation()}
-                className="p-0 gap-0 w-[var(--radix-popover-trigger-width)] max-w-none max-h-72 overflow-y-auto overscroll-contain"
+                className="p-0 gap-0 w-[var(--radix-popover-trigger-width)] max-w-none max-h-96 overflow-y-auto overscroll-contain"
               >
                 {filtered.length === 0 ? (
                   <div className="px-3 py-3 text-xs text-muted-foreground">
                     {allAdSets.length === 0 ? "No ad sets in this account" : "No match"}
                   </div>
-                ) : filtered.map(a => (
-                  <button key={a.id} onClick={() => selectSource(a)}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-accent border-b last:border-b-0">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate">{a.name}</p>
-                      <p className="text-xs text-muted-foreground">{a.id}</p>
+                ) : campaignGroups.map(group => (
+                  <div key={group.campaignId}>
+                    <div className="sticky top-0 z-10 px-3 py-1.5 bg-muted/95 backdrop-blur-sm border-b">
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">Campaign</span>
+                        <span className="ml-auto text-[11px] text-muted-foreground tabular-nums shrink-0">
+                          {group.adSets.length} ad set{group.adSets.length > 1 ? "s" : ""} · {formatCurrency(group.spend)}
+                        </span>
+                      </div>
+                      {/* Wraps instead of truncating — the header is printed once,
+                          so the whole name fits and the tail stays readable. */}
+                      <p className="text-xs font-medium leading-snug break-words">
+                        {campaignPrefix && group.campaignName.startsWith(campaignPrefix) ? (
+                          <>
+                            <span className="font-normal text-muted-foreground/60">{campaignPrefix}</span>
+                            {group.campaignName.slice(campaignPrefix.length)}
+                          </>
+                        ) : group.campaignName}
+                      </p>
                     </div>
-                    <span className={cn(
-                      "text-xs px-1.5 py-0.5 rounded-full font-medium shrink-0",
-                      a.effective_status === "ACTIVE"
-                        ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-                        : "bg-muted text-muted-foreground"
-                    )}>
-                      {a.effective_status}
-                    </span>
-                  </button>
+                    {group.adSets.map(a => (
+                      <button key={a.id} onClick={() => selectSource(a)}
+                        className="w-full flex items-start gap-2 pl-5 pr-3 py-2 text-left hover:bg-accent border-b last:border-b-0">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium truncate">{a.name}</p>
+                          <p className="text-[11px] text-muted-foreground/70 truncate">{a.id}</p>
+                        </div>
+                        <div className="flex flex-col items-end gap-1 shrink-0">
+                          <span className={cn(
+                            "text-xs px-1.5 py-0.5 rounded-full font-medium",
+                            a.effective_status === "ACTIVE"
+                              ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                              : "bg-muted text-muted-foreground"
+                          )}>
+                            {a.effective_status}
+                          </span>
+                          <span className="text-[11px] text-muted-foreground tabular-nums" title="Spend in the last 7 days">
+                            {formatCurrency(adSetSpend(a))} · 7d
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 ))}
               </PopoverContent>
             </Popover>
+            {/* The chip only fits the name, which is the part that repeats.
+                Confirm the pick by the campaign it came from. */}
+            {sourceAdSet && (
+              <p className="mt-2 text-xs text-muted-foreground leading-snug break-words">
+                In <span className="font-medium text-foreground">{sourceAdSet.campaign_name || "an unavailable campaign"}</span>
+                {" · "}{formatCurrency(adSetSpend(sourceAdSet))} spent in the last 7 days
+              </p>
+            )}
           </div>
 
           {sourceAdSet && (

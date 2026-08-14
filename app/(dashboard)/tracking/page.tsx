@@ -1,12 +1,14 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { IconAlertTriangle, IconCalendarTime, IconChartBar, IconCheck, IconChevronDown, IconChevronRight, IconCopy, IconInfoCircle, IconLoader2, IconMail, IconNote, IconPhoto, IconRefresh, IconRocket, IconStar } from "@tabler/icons-react"
+import { IconActivityHeartbeat, IconAlertTriangle, IconCalendarTime, IconChartBar, IconCheck, IconChevronDown, IconChevronRight, IconCopy, IconInfoCircle, IconLoader2, IconMail, IconNote, IconPhoto, IconRefresh, IconRocket, IconStar } from "@tabler/icons-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { AdsDateRangePicker, getPresetRange } from "@/components/ads-manager/AdsDateRangePicker"
+import { AppStatusTab } from "@/components/tracking/AppStatusTab"
 import { CLASS_DESCRIPTION, CLASS_LABEL, CLASS_ORDER, type ActivityClass } from "@/lib/tracking/activity-catalog"
 import { mergeUsageRows } from "@/lib/tracking/activity"
 import { buildTrackingReport } from "@/lib/tracking/report"
@@ -633,6 +635,13 @@ function inclusiveDays(period: TrackingPeriod) {
 
 export default function TrackingPage() {
   const reportCaptureRef = useRef<HTMLDivElement>(null)
+  /**
+   * Two tabs, MECE: Usage is people and outcome, App status is the machine. The
+   * reporting period below belongs to Usage only — App status runs on its own fixed
+   * 24h/7d windows, because "is it healthy right now" is not a question a date range
+   * from last month can answer.
+   */
+  const [tab, setTab] = useState<"usage" | "status">("usage")
   const [data, setData] = useState<TrackingData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -925,20 +934,45 @@ export default function TrackingPage() {
         <div>
           <p className="text-sm font-medium text-muted-foreground">Active organization</p>
           <h1 className="mt-1 text-2xl font-semibold tracking-tight">Tracking System</h1>
-          <p className="mt-2 text-sm text-muted-foreground">Usage — delivery and app activity — plus Creative coverage, for the selected reporting period.</p>
+          <p className="mt-2 text-sm text-muted-foreground">
+            {tab === "usage"
+              ? "Usage — delivery and app activity — plus Creative coverage, for the selected reporting period."
+              : "App status — pipeline reliability, Meta quota, background jobs and the upload queue, live."}
+          </p>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => setReportOpen(true)} disabled={!data}>
-            <IconNote className="size-4" />
-            Report
-          </Button>
-          <Button variant="outline" onClick={() => void load()} disabled={loading}>
-            {loading ? <IconLoader2 className="size-4 animate-spin" /> : <IconRefresh className="size-4" />}
-            Refresh
-          </Button>
-        </div>
+        {tab === "usage" && (
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => setReportOpen(true)} disabled={!data}>
+              <IconNote className="size-4" />
+              Report
+            </Button>
+            <Button variant="outline" onClick={() => void load()} disabled={loading}>
+              {loading ? <IconLoader2 className="size-4 animate-spin" /> : <IconRefresh className="size-4" />}
+              Refresh
+            </Button>
+          </div>
+        )}
       </header>
 
+      <Tabs value={tab} onValueChange={value => setTab(value as "usage" | "status")} className="gap-6">
+        <TabsList>
+          <TabsTrigger value="usage">
+            <IconChartBar className="size-4" />
+            Usage
+          </TabsTrigger>
+          <TabsTrigger value="status">
+            <IconActivityHeartbeat className="size-4" />
+            App status
+          </TabsTrigger>
+        </TabsList>
+
+        {/* App status mounts only when opened — no background fetch, and the adoption
+            signal it POSTs stays an honest count of people who actually looked. */}
+        <TabsContent value="status">
+          <AppStatusTab />
+        </TabsContent>
+
+        <TabsContent value="usage" className="space-y-6">
       {error && <div className="flex items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"><IconAlertTriangle className="size-4" />{error}</div>}
       {loading && !data && <div className="flex min-h-64 items-center justify-center"><IconLoader2 className="size-6 animate-spin text-muted-foreground" /></div>}
 
@@ -1116,6 +1150,8 @@ export default function TrackingPage() {
 
         <p className="flex items-center gap-2 text-xs text-muted-foreground"><IconChartBar className="size-3.5" />Updated {new Date(data.generatedAt).toLocaleString()}</p>
       </>}
+        </TabsContent>
+      </Tabs>
 
       <Dialog open={openMetric !== null} onOpenChange={open => { if (!open) setOpenMetric(null) }}>
         <DialogContent className="max-w-lg">

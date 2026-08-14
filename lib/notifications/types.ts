@@ -57,6 +57,7 @@ export type ObjectType =
   | "painpoint"
   | "fallback"
   | "report"
+  | "app_status"
   | "facebook_connection"
   | "organization"
 
