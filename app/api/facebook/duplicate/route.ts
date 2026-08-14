@@ -11,6 +11,7 @@ export async function POST(request: NextRequest) {
 
     const body = await request.json()
     const { id, name, deep_copy, status_option, copies, adAccountId, target_adset_id } = body
+    const statusOption = ["ACTIVE", "PAUSED", "INHERITED"].includes(status_option) ? status_option : "PAUSED"
 
     if (!id) {
       return NextResponse.json({ error: "id is required" }, { status: 400 })
@@ -64,7 +65,7 @@ export async function POST(request: NextRequest) {
       const res = await duplicateNode(id, token, {
         name: copyName,
         deep_copy,
-        status_option,
+        status_option: statusOption,
         adset_id: targetAdsetId,
       }, { isManual: manual })
       results.push(res.id)

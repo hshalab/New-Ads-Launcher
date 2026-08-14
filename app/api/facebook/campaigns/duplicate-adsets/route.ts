@@ -96,7 +96,12 @@ export async function POST(request: NextRequest) {
         const wantDeepCopy = !!cfg.deepCopy
         // null = "not specified" (use Meta deep_copy=true), [] = "explicitly empty" (no ads)
         const selectedAdIds: string[] | null = cfg.selectedAdIds === null ? null : Array.isArray(cfg.selectedAdIds) ? cfg.selectedAdIds : null
-        const duplicatedAdsStatus = cfg.duplicatedAdsStatus === "ACTIVE" ? "ACTIVE" : "PAUSED"
+        const statusOption = ["ACTIVE", "PAUSED", "INHERITED"].includes(cfg.statusOption)
+          ? cfg.statusOption
+          : cfg.statusActive ? "ACTIVE" : "PAUSED"
+        const duplicatedAdsStatus = ["ACTIVE", "PAUSED", "INHERITED"].includes(cfg.duplicatedAdsStatus)
+          ? cfg.duplicatedAdsStatus
+          : "PAUSED"
 
         for (let k = 0; k < copies; k++) {
           const aSuffix = copies > 1 ? ` ${k + 1}` : ""
@@ -107,7 +112,7 @@ export async function POST(request: NextRequest) {
             access_token: connection.access_token,
             campaign_id: targetCampaignId,
             deep_copy: useDeepCopyFlag ? "true" : "false",
-            status_option: cfg.statusActive ? "ACTIVE" : "PAUSED",
+            status_option: statusOption,
           })
           const aRes = await fetch(`${GRAPH_API_BASE}/${cfg.id}/copies?${adsetParams}`, { method: "POST" })
           const aData = await aRes.json()

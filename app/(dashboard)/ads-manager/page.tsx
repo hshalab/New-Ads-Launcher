@@ -1227,7 +1227,7 @@ function AdsManagerContent() {
   const [duplicateAdSetPickerOpen, setDuplicateAdSetPickerOpen] = useState(false)
   const [duplicateAdSetSearch, setDuplicateAdSetSearch] = useState("")
   const [duplicateNewName, setDuplicateNewName] = useState("")
-  const [duplicateConfirmOpen, setDuplicateConfirmOpen] = useState(false)
+  const [duplicateDeliveryStatus, setDuplicateDeliveryStatus] = useState<"source" | "paused" | "active">("source")
   const [savingTemplateId, setSavingTemplateId] = useState<string | null>(null)
   const [actionToast, setActionToast] = useState<{ kind: "success" | "error"; message: string; href?: string } | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
@@ -1358,6 +1358,7 @@ function AdsManagerContent() {
     setDuplicateTargetId("")
     setDuplicateName("")
     setDuplicateNewName("")
+    setDuplicateDeliveryStatus("source")
     setDuplicateAdSetPickerOpen(false)
     setDuplicateAdSetSearch("")
   }, [tab])
@@ -1995,13 +1996,7 @@ function AdsManagerContent() {
     : availableDuplicateAdSetOptions
   const selectedDuplicateAdSet = duplicateAdSetOptions.find(adSet => adSet.id === duplicateTargetId)
 
-  const openDuplicatePublishConfirm = () => {
-    if (!canDuplicate || isDuplicating) return
-    setDuplicateDialogOpen(false)
-    setDuplicateConfirmOpen(true)
-  }
-
-  const executeDuplicate = async (active: boolean) => {
+  const executeDuplicate = async (workflow: "draft" | "publish") => {
     if (selectedIds.size === 0 || !selectedAccountId) return
 
     const ids = Array.from(selectedIds)
@@ -2034,7 +2029,6 @@ function AdsManagerContent() {
     }
     const copiedName = (node: { name: string }) => ids.length === 1 && duplicateName.trim() ? duplicateName.trim() : `${node.name} - Copy`
 
-    setDuplicateConfirmOpen(false)
     setDuplicateDialogOpen(false)
     setMiniStatusPopup({ title: "Duplicating…", total: ids.length, items: pendingItems })
     setIsDuplicating(true)
@@ -2045,13 +2039,16 @@ function AdsManagerContent() {
           if (!node) throw new Error("Selected item is no longer loaded")
           let createdIds: string[] = []
           const nodeName = copiedName(node)
+          const statusOption = duplicateDeliveryStatus === "source"
+            ? "INHERITED"
+            : duplicateDeliveryStatus === "active" ? "ACTIVE" : "PAUSED"
 
           if (tab === "campaigns") {
             const campaign = node as Campaign
             const d = await postJson(`/api/facebook/campaigns/${encodeURIComponent(id)}/duplicate`, {
               customName: copiedName(campaign),
               count: copyCount,
-              launchAsActive: active,
+              statusOption,
               adAccountId: selectedAccountId,
               mode: "ALL",
             })
@@ -2066,10 +2063,10 @@ function AdsManagerContent() {
                 id,
                 customName: copiedName(adSet),
                 copies: copyCount,
-                statusActive: active,
+                statusOption,
                 deepCopy: true,
                 selectedAdIds: null,
-                duplicatedAdsStatus: active ? "ACTIVE" : "PAUSED",
+                duplicatedAdsStatus: statusOption,
               }],
             })
             createdIds = (d.campaigns || [])
@@ -2085,10 +2082,10 @@ function AdsManagerContent() {
                 id: ad.adset_id,
                 customName: duplicateNewName.trim() || `${sourceAdSet?.name || ad.name} - Copy`,
                 copies: copyCount,
-                statusActive: active,
+                statusOption,
                 deepCopy: true,
                 selectedAdIds: [id],
-                duplicatedAdsStatus: active ? "ACTIVE" : "PAUSED",
+                duplicatedAdsStatus: statusOption,
               }],
             })
             createdIds = (d.campaigns || [])
@@ -2100,7 +2097,7 @@ function AdsManagerContent() {
               id,
               name: copiedName(ad),
               deep_copy: false,
-              status_option: active ? "ACTIVE" : "PAUSED",
+              status_option: statusOption,
               copies: copyCount,
               adAccountId: selectedAccountId,
               target_adset_id: duplicateDestination === "existing" ? duplicateTargetId : undefined,
@@ -2123,7 +2120,7 @@ function AdsManagerContent() {
       await fetchMainData(true)
       if (firstCreated) {
         setSelectedIds(new Set(copiedIds))
-        openWorkspaceEditor(firstCreated)
+        if (workflow === "draft") openWorkspaceEditor(firstCreated)
       } else {
         setSelectedIds(new Set())
       }
@@ -4942,6 +4939,38 @@ function AdsManagerContent() {
                     </button>
                   </div>
             </section>
+
+            <section className="space-y-3">
+                <div>
+                  <Label className="text-sm font-semibold text-foreground">Meta delivery status</Label>
+                  <p className="mt-1 text-xs text-muted-foreground">Independent from Draft or Publish. Match source keeps each copied item's configured status.</p>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {([
+                    ["source", "Match source", "Keep each source item's status."],
+                    ["paused", "Paused", "Create copies turned off."],
+                    ["active", "On", "Create copies turned on."],
+                  ] as const).map(([value, label, description]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setDuplicateDeliveryStatus(value)}
+                      className={cn(
+                        "rounded-xl border px-3 py-3 text-left transition",
+                        duplicateDeliveryStatus === value
+                          ? "border-[#1877f2] bg-[#e7f3ff] shadow-[0_0_0_1px_#1877f2] dark:bg-blue-950/30"
+                          : "border-border bg-background hover:bg-muted/50",
+                      )}
+                    >
+                      <span className="block text-sm font-semibold">{label}</span>
+                      <span className="mt-1 block text-xs leading-5 text-muted-foreground">{description}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="rounded-lg bg-muted/50 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                  Draft/Publish controls the AdLauncher editing workflow only. It never changes the Meta delivery status selected above.
+                </p>
+            </section>
           </div>
 
           <DialogFooter className="border-t bg-muted/20 px-6 py-4">
@@ -4951,77 +4980,43 @@ function AdsManagerContent() {
                 <Button
                   variant="outline"
                   disabled={isDuplicating}
-                  onClick={() => executeDuplicate(false)}
+                  onClick={() => executeDuplicate("draft")}
                 >
-                  Save draft
+                  Save as draft
                 </Button>
                 <Button
-                  onClick={openDuplicatePublishConfirm}
+                  onClick={() => executeDuplicate("publish")}
                   disabled={isDuplicating || !canDuplicate}
                   className="bg-[#1877f2] text-white hover:bg-[#166fe5]"
                 >
                   {isDuplicating && <IconLoader2 className="mr-2 size-4 animate-spin" />}
-                  Duplicate
+                  Publish duplicate
                 </Button>
               </>
             ) : (
               <>
                 <Button variant="outline" onClick={() => setDuplicateDialogOpen(false)} disabled={isDuplicating}>Cancel</Button>
                 <Button
-                  onClick={openDuplicatePublishConfirm}
+                  variant="outline"
+                  onClick={() => executeDuplicate("draft")}
+                  disabled={isDuplicating || !canDuplicate}
+                >
+                  {isDuplicating && <IconLoader2 className="mr-2 size-4 animate-spin" />}
+                  Save as draft
+                </Button>
+                <Button
+                  onClick={() => executeDuplicate("publish")}
                   disabled={isDuplicating || !canDuplicate}
                   className="bg-[#1877f2] text-white hover:bg-[#166fe5]"
                 >
                   {isDuplicating && <IconLoader2 className="mr-2 size-4 animate-spin" />}
-                  Next: choose status
+                  Publish duplicate
                 </Button>
               </>
             )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      {/* Duplicate Publish Confirmation Dialog */}
-      <Dialog open={duplicateConfirmOpen} onOpenChange={open => !isDuplicating && setDuplicateConfirmOpen(open)}>
-        <DialogContent className="gap-0 p-0 sm:max-w-[500px]">
-          <DialogHeader className="border-b px-6 py-5 text-left">
-            <DialogTitle className="text-lg font-semibold text-foreground">How should the copies be created?</DialogTitle>
-          </DialogHeader>
-          <div className="px-6 py-5 text-sm text-muted-foreground">
-            Create paused copies to review safely, or create them active so delivery can start immediately.
-          </div>
-          <DialogFooter className="border-t bg-muted/20 px-6 py-4 sm:flex-row sm:justify-between">
-            <Button
-              variant="outline"
-              onClick={() => {
-                setDuplicateConfirmOpen(false)
-                setDuplicateDialogOpen(true)
-              }}
-              disabled={isDuplicating}
-            >
-              Back
-            </Button>
-            <div className="flex flex-col-reverse gap-2 sm:flex-row">
-              <Button
-                variant="outline"
-                disabled={isDuplicating}
-                onClick={() => executeDuplicate(false)}
-              >
-                Create paused
-              </Button>
-              <Button
-                className="bg-[#078f67] text-white hover:bg-[#067b59]"
-                disabled={isDuplicating}
-                onClick={() => executeDuplicate(true)}
-              >
-                {isDuplicating && <IconLoader2 className="mr-1.5 size-4 animate-spin" />}
-                Create and turn on
-              </Button>
-            </div>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
 
       {/* ── History Sheet ── */}
       <Sheet open={historyOpen} onOpenChange={setHistoryOpen}>

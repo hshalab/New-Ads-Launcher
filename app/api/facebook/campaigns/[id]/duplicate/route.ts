@@ -5,7 +5,7 @@ import { invalidateMetaReadCacheAfterWrite } from "../../../_db-cache"
 const GRAPH_API_BASE = "https://graph.facebook.com/v25.0"
 
 // POST /api/facebook/campaigns/[id]/duplicate
-// Body: { customName, count, dailyBudget, lifetimeBudget, bidStrategy, launchAsActive, adAccountId,
+// Body: { customName, count, dailyBudget, lifetimeBudget, bidStrategy, statusOption, launchAsActive, adAccountId,
 //         mode: "ALL" | undefined,
 //         adSetConfigs: [{ id, customName, copies, statusActive, startTime, endTime, customAttribution, deepCopy }] }
 // mode: "ALL" — Ads Manager campaign-level duplicate: Meta deep_copy=true copies every child
@@ -29,8 +29,9 @@ export async function POST(
 
     const customName = body.customName || ""
     const count = Math.max(1, Math.min(20, body.count || 1))
-    const launchAsActive = !!body.launchAsActive
-    const status = launchAsActive ? "ACTIVE" : "PAUSED"
+    const status = ["ACTIVE", "PAUSED", "INHERITED"].includes(body.statusOption)
+      ? body.statusOption
+      : body.launchAsActive ? "ACTIVE" : "PAUSED"
     const adSetConfigs: any[] = Array.isArray(body.adSetConfigs) ? body.adSetConfigs : []
 
     let connection
@@ -132,7 +133,9 @@ export async function POST(
               access_token: connection.access_token,
               campaign_id: newCampaignId,
               deep_copy: cfg.deepCopy ? "true" : "false",
-              status_option: cfg.statusActive ? "ACTIVE" : "PAUSED",
+              status_option: ["ACTIVE", "PAUSED", "INHERITED"].includes(cfg.statusOption)
+                ? cfg.statusOption
+                : cfg.statusActive ? "ACTIVE" : "PAUSED",
             })
             const aRes = await fetch(`${GRAPH_API_BASE}/${cfg.id}/copies?${adsetParams}`, { method: "POST" })
             const aData = await aRes.json()
