@@ -4745,6 +4745,8 @@ function DuplicateAdSetModal({
               </PopoverTrigger>
               <PopoverContent
                 align="start"
+                side="bottom"
+                avoidCollisions={false}
                 sideOffset={4}
                 onOpenAutoFocus={e => e.preventDefault()}
                 onWheel={e => e.stopPropagation()}
