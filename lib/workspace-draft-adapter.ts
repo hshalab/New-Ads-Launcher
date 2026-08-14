@@ -1,72 +1,28 @@
 /**
- * The bridge that lets the Ads Manager editor be the *only* editing surface (BL-64).
+ * Campaign shell helpers for BL-64 create-new flow.
  *
- * A new campaign has no Meta ids, so it cannot be a normal editor draft. Rather than give the
- * editor a second state model, the create flow's `CampaignFormState` stays the single source of
- * truth and the wire format for `POST /api/facebook/create-campaign` — that route keeps its auth,
- * org scoping, Via LAUNCH resolution, ODAX validation, rollback and `launch_batches` insert
- * untouched. This module renders that state *as* three `WorkspaceNode`s for the editor, and folds
- * the editor's per-node edits back into it.
+ * Create new campaign creates a real PAUSED Meta campaign only — no synthetic ad set / ad.
+ * Attach / full hierarchy still uses `POST /api/facebook/create-campaign` and
+ * `CampaignFormState` as its wire format. This module maps gate/form campaign fields into the
+ * shell route payload and back into campaign-level form fields for editor edits.
  *
- * Two invariants the tests hold:
- *
- *  1. **Round trip is lossless.** `apply(apply(apply(state, nodes)))` === `state`. A field that
- *     survives the trip out but not the trip back is a field the user edits and Meta never sees —
- *     the exact defect class TD-38 was (`create-campaign/route.ts` silently dropping eight
- *     targeting fields).
- *  2. **The mapping is total.** `FIELD_OWNER` names every key of `CampaignFormState`, so adding a
- *     field to the form without deciding which node owns it is a type error, not a silent drop.
- *
- * Units: the form holds human strings ("100", "1.5"); Meta and `WorkspaceNode` hold minor units
- * (budget/bid ×100, ROAS floor ×10000). Conversion happens here and nowhere else.
+ * CBO: campaign owns daily budget + bid strategy (no cap/ROAS value).
+ * ABO: campaign owns neither; ad set owns budget + strategy + value later.
  */
 
-import { resolveOdaxRow } from "@/lib/odax-matrix"
 import { isBidStrategy } from "@/lib/create-campaign-bidding"
 import type { BidStrategy } from "@/lib/create-campaign-bidding"
+import type { CampaignObjective } from "@/lib/odax-matrix"
+import type { CampaignFormState, SpecialAdCategory } from "@/components/ads-manager/create-flow/types"
 import type { WorkspaceNode } from "@/components/ads-manager/UnifiedWorkspaceEditor"
-import type {
-  AdvertiserEntity,
-  AttributionClickDays,
-  AttributionEngagedViewDays,
-  AttributionViewDays,
-  CampaignFormState,
-  ConversionEvent,
-  GenderTargeting,
-  MediaType,
-  PlacementMode,
-  PublisherPlatform,
-  TargetingOption,
-} from "@/components/ads-manager/create-flow/types"
 
 export type DraftLevel = "campaign" | "adset" | "ad"
 
 /**
- * Synthetic ids for the unpublished hierarchy. They are deliberately not Meta-shaped (Meta ids are
- * all digits) so a draft node can never be mistaken for a live object by a route that takes an id.
- */
-export const DRAFT_IDS = {
-  campaign: "draft:campaign",
-  adset: "draft:adset",
-  ad: "draft:ad",
-} as const
-
-export function isDraftId(id: string | undefined | null): boolean {
-  return typeof id === "string" && id.startsWith("draft:")
-}
-
-export type DraftHierarchy = {
-  campaign: WorkspaceNode
-  adset: WorkspaceNode
-  ad: WorkspaceNode
-}
-
-/**
- * Which node owns each form field. Exhaustive by construction — `Record<keyof CampaignFormState, …>`
- * fails to compile when a field is added to the form and not placed here.
+ * Which node owns each form field. Exhaustive — adding a form field without placing it here is a
+ * type error. Kept so later attach/editor mapping cannot silently drop fields (TD-38 class).
  *
- * `"gate"` = decided before the editor opens (objective, setup scope) and rendered read-only, the
- * way Meta locks objective and buying type after create.
+ * `"gate"` = decided before the editor opens (objective, attach scope).
  */
 export const FIELD_OWNER: Record<keyof CampaignFormState, DraftLevel | "gate"> = {
   existingCampaignId: "gate",
@@ -76,8 +32,7 @@ export const FIELD_OWNER: Record<keyof CampaignFormState, DraftLevel | "gate"> =
   specialAdCategories: "campaign",
   advantageCampaignBudget: "campaign",
   campaignBudget: "campaign",
-  // One form field, two homes: the strategy sits on the campaign under CBO and on the ad set under
-  // ABO, because that is where Meta accepts it. The *value* it caps always sits on the ad set.
+  // Strategy sits on campaign under CBO and on the ad set under ABO. Cap/ROAS value always ad set.
   campaignBidStrategy: "campaign",
 
   adSetName: "adset",
@@ -149,255 +104,206 @@ export function fromMinorUnits(value: string | undefined): string {
   return Number.isInteger(major) ? String(major) : major.toFixed(2)
 }
 
-const capStrategies = new Set<BidStrategy>(["COST_CAP", "LOWEST_COST_WITH_BID_CAP"])
+// ---------------------------------------------------------------------------- campaign shell
 
-function genderCodes(gender: GenderTargeting): number[] | undefined {
-  if (gender === "MALE") return [1]
-  if (gender === "FEMALE") return [2]
-  return undefined
-}
-
-function genderFromCodes(codes: number[] | undefined): GenderTargeting {
-  if (codes?.[0] === 1) return "MALE"
-  if (codes?.[0] === 2) return "FEMALE"
-  return "ALL"
+/**
+ * Wire body for `POST /api/facebook/create-campaign-shell`.
+ * Campaign fields only — no ad set, ad, creative, targeting, or cap value.
+ */
+export type CampaignShellPayload = {
+  name: string
+  objective: CampaignObjective
+  specialAdCategories: SpecialAdCategory[]
+  advantageCampaignBudget: boolean
+  /** Major-unit string when CBO; omitted when ABO. */
+  campaignBudget?: string
+  /** Present only when CBO. Cap/ROAS amounts never live here. */
+  campaignBidStrategy?: BidStrategy
 }
 
 /**
- * Meta returns detailed targeting as `flexible_spec: [{ interests: [...] }]`. The form holds a flat
- * list because the create flow only ever produces one OR-group.
+ * Map form/gate state → shell create payload.
+ * Rejects attach-scope state: shell create is create-new only.
  */
-function toFlexibleSpec(options: TargetingOption[]): unknown[] | undefined {
-  if (options.length === 0) return undefined
-  return [{ interests: options.map(option => ({ id: option.id, name: option.name })) }]
-}
-
-function fromFlexibleSpec(spec: unknown[] | undefined): TargetingOption[] {
-  const first = spec?.[0] as { interests?: TargetingOption[] } | undefined
-  return (first?.interests || []).map(option => ({ id: option.id, name: option.name }))
-}
-
-function attributionSpec(state: CampaignFormState): { event_type: string; window_days: number }[] {
-  const spec = [{ event_type: "CLICK_THROUGH", window_days: Number(state.attributionClickDays) }]
-  if (state.attributionViewDays !== "0") {
-    spec.push({ event_type: "VIEW_THROUGH", window_days: Number(state.attributionViewDays) })
+export function formStateToCampaignShell(
+  state: Pick<
+    CampaignFormState,
+    | "existingCampaignId"
+    | "campaignName"
+    | "objective"
+    | "specialAdCategories"
+    | "advantageCampaignBudget"
+    | "campaignBudget"
+    | "campaignBidStrategy"
+  >
+): CampaignShellPayload {
+  if (state.existingCampaignId) {
+    throw new Error("Campaign shell create is for new campaigns only; attach uses create-campaign")
   }
-  if (state.attributionEngagedViewDays !== "0") {
-    spec.push({ event_type: "ENGAGED_VIDEO_VIEW", window_days: Number(state.attributionEngagedViewDays) })
-  }
-  return spec
-}
 
-function windowDays(
-  spec: { event_type: string; window_days: number }[] | undefined,
-  eventType: string
-): string {
-  const match = spec?.find(entry => entry.event_type === eventType)
-  return match ? String(match.window_days) : "0"
-}
-
-// ---------------------------------------------------------------------------- form → nodes
-
-export function formStateToDraftNodes(state: CampaignFormState): DraftHierarchy {
+  const name = state.campaignName.trim() || "New Campaign"
   const cbo = state.advantageCampaignBudget
   const strategy: BidStrategy = isBidStrategy(state.campaignBidStrategy)
     ? state.campaignBidStrategy
     : "LOWEST_COST_WITHOUT_CAP"
-  const row = resolveOdaxRow(state.objective, state.conversionLocation, state.engagementType)
 
-  const campaign: WorkspaceNode = {
-    id: DRAFT_IDS.campaign,
-    // Attach scope: the campaign belongs to Meta already, so its name is the existing one and the
-    // editor renders the whole campaign node read-only.
-    name: state.existingCampaignId ? state.existingCampaignName : state.campaignName,
-    status: "PAUSED",
+  if (!cbo) {
+    return {
+      name,
+      objective: state.objective,
+      specialAdCategories: state.specialAdCategories,
+      advantageCampaignBudget: false,
+    }
+  }
+
+  return {
+    name,
     objective: state.objective,
-    buying_type: "AUCTION",
-    special_ad_categories: state.specialAdCategories,
-    daily_budget: cbo ? toMinorUnits(state.campaignBudget) : undefined,
-    bid_strategy: cbo ? strategy : undefined,
-    draft_of: state.existingCampaignId || undefined,
+    specialAdCategories: state.specialAdCategories,
+    advantageCampaignBudget: true,
+    campaignBudget: state.campaignBudget.trim(),
+    campaignBidStrategy: strategy,
   }
-
-  const adset: WorkspaceNode = {
-    id: DRAFT_IDS.adset,
-    campaign_id: state.existingCampaignId || DRAFT_IDS.campaign,
-    name: state.adSetName,
-    status: "PAUSED",
-    daily_budget: cbo ? undefined : toMinorUnits(state.dailyBudget),
-    conversion_location: state.conversionLocation || undefined,
-    engagement_type: state.engagementType || undefined,
-    destination_type: row?.destinationType,
-    optimization_goal: state.performanceGoal,
-    bid_strategy: cbo ? undefined : strategy,
-    // The cap value lives on the ad set at every budget mode — Meta has no campaign-level
-    // `bid_amount`. Under CBO the campaign owns the strategy and the ad set owns its number.
-    bid_amount: capStrategies.has(strategy) ? toMinorUnits(state.costPerResultGoal) : undefined,
-    bid_constraints:
-      strategy === "LOWEST_COST_WITH_MIN_ROAS" && state.roasGoal.trim()
-        ? { roas_average_floor: Math.round(Number.parseFloat(state.roasGoal) * 10000) }
-        : undefined,
-    promoted_object: state.pixelId
-      ? { pixel_id: state.pixelId, custom_event_type: state.conversionEvent }
-      : undefined,
-    attribution_spec: attributionSpec(state),
-    start_time: state.scheduleStart || undefined,
-    stop_time: state.scheduleEnd || undefined,
-    schedule_time_basis: state.scheduleTimeBasis,
-    targeting: {
-      geo_locations: { countries: state.locations },
-      age_min: state.ageMin,
-      age_max: state.ageMax,
-      genders: genderCodes(state.gender),
-      custom_audiences: state.customAudiences,
-      excluded_custom_audiences: state.excludedCustomAudiences,
-      flexible_spec: toFlexibleSpec(state.detailedTargeting),
-      // Meta reports audience expansion as `targeting_optimization` on read; the create path sends
-      // `targeting_automation.advantage_audience`. The editor reads the former, so emit that.
-      targeting_optimization: state.targetingExpansion ? "expansion_all" : "none",
-      // Advantage+ placements means "let Meta choose", which is what an absent key already says.
-      publisher_platforms: state.placementMode === "manual" ? state.publisherPlatforms : undefined,
-    },
-    advertiser: state.advertiser,
-    payer: state.payer,
-  }
-
-  const ad: WorkspaceNode = {
-    id: DRAFT_IDS.ad,
-    campaign_id: state.existingCampaignId || DRAFT_IDS.campaign,
-    adset_id: DRAFT_IDS.adset,
-    name: state.adName,
-    status: "PAUSED",
-    page_id: state.pageId,
-    instagram_id: state.instagramId || undefined,
-    portal_creative_id: state.creativeId || undefined,
-    creative_ids: state.creativeIds,
-    selected_creatives: state.selectedCreatives,
-    creative_file_name: state.creativeFileName || undefined,
-    thumb_url: state.creativePreviewUrl || undefined,
-    media_url: state.mediaUrl || undefined,
-    media_type: state.mediaType,
-    one_ad_per_adset: state.oneAdPerAdset,
-    primaryText: state.primaryText,
-    primary_text_variations: state.primaryTextVariations,
-    headline: state.headline,
-    headline_variations: state.headlineVariations,
-    description: state.description,
-    description_variations: state.descriptionVariations,
-    cta: state.callToAction,
-    link: state.destinationUrl,
-    url_parameters: state.urlParameters || undefined,
-  }
-
-  return { campaign, adset, ad }
 }
 
-// ---------------------------------------------------------------------------- node → form
+/** Campaign-level form fields after an editor edit of a live shell. */
+export type CampaignShellEdit = {
+  name: string
+  specialAdCategories?: SpecialAdCategory[]
+  advantageCampaignBudget: boolean
+  /** Major units when CBO. */
+  campaignBudget?: string
+  campaignBidStrategy?: BidStrategy
+}
 
 /**
- * Fold one edited node back into the form state. Called per `onDraftChange` from the editor, so it
- * must be pure and must touch only the fields `FIELD_OWNER` assigns to that level — otherwise
- * editing the ad set would reset the ad.
+ * Fold campaign-shell editor fields back into form state.
+ * Does not touch ad set / ad fields — those are created later via explicit child ops.
  */
-export function applyDraftNode(
+export function applyCampaignShellEdit(
   state: CampaignFormState,
-  node: WorkspaceNode,
-  level: DraftLevel
+  edit: CampaignShellEdit
 ): CampaignFormState {
-  if (level === "campaign") return applyCampaign(state, node)
-  if (level === "adset") return applyAdSet(state, node)
-  return applyAd(state, node)
-}
+  const cbo = edit.advantageCampaignBudget
+  const strategy =
+    cbo && isBidStrategy(edit.campaignBidStrategy)
+      ? edit.campaignBidStrategy
+      : state.campaignBidStrategy
 
-function applyCampaign(state: CampaignFormState, node: WorkspaceNode): CampaignFormState {
-  const cbo = node.daily_budget != null && node.daily_budget !== ""
-  const strategy = isBidStrategy(node.bid_strategy) ? node.bid_strategy : state.campaignBidStrategy
   return {
     ...state,
-    ...(state.existingCampaignId ? {} : { campaignName: node.name }),
-    specialAdCategories: (node.special_ad_categories || []) as CampaignFormState["specialAdCategories"],
+    campaignName: edit.name,
+    specialAdCategories: edit.specialAdCategories ?? state.specialAdCategories,
     advantageCampaignBudget: cbo,
-    campaignBudget: cbo ? fromMinorUnits(node.daily_budget) : state.campaignBudget,
+    campaignBudget: cbo
+      ? (edit.campaignBudget?.trim() || state.campaignBudget)
+      : state.campaignBudget,
     campaignBidStrategy: cbo ? strategy : state.campaignBidStrategy,
   }
 }
 
-function applyAdSet(state: CampaignFormState, node: WorkspaceNode): CampaignFormState {
-  const targeting = node.targeting || {}
-  const cbo = state.advantageCampaignBudget
-  const strategy = !cbo && isBidStrategy(node.bid_strategy) ? node.bid_strategy : state.campaignBidStrategy
-  const roasFloor = node.bid_constraints?.roas_average_floor
+export type MaterializeNode = {
+  nodeId: string
+  level: DraftLevel
+  metaId?: string
+  contextOnly?: boolean
+  parentNodeId?: string
+  name?: string
+  objective?: string
+  specialAdCategories?: string[]
+  dailyBudget?: string
+  lifetimeBudget?: string
+  bidStrategy?: string
+  bidAmount?: string
+  bidConstraints?: { roas_average_floor: number }
+  targeting?: WorkspaceNode["targeting"]
+  optimizationGoal?: string
+  billingEvent?: string
+  startTime?: string
+  endTime?: string
+  destinationType?: string
+  promotedObject?: WorkspaceNode["promoted_object"]
+  attributionSpec?: WorkspaceNode["attribution_spec"]
+  dsaBeneficiary?: string
+  dsaPayor?: string
+  pageId?: string
+  imageHash?: string
+  videoId?: string
+  thumbnailUrl?: string
+  title?: string
+  body?: string
+  description?: string
+  cta?: string
+  linkUrl?: string
+  primaryTextVariations?: string[]
+  headlineVariations?: string[]
+  descriptionVariations?: string[]
+  creativeId?: string
+  creativeThumb?: string
+}
+
+function materializeNode(node: WorkspaceNode, level: DraftLevel): MaterializeNode {
+  const creative = node.creative
   return {
-    ...state,
-    adSetName: node.name,
-    conversionLocation: (node.conversion_location as CampaignFormState["conversionLocation"]) ?? null,
-    engagementType: (node.engagement_type as CampaignFormState["engagementType"]) ?? null,
-    performanceGoal: (node.optimization_goal || state.performanceGoal) as CampaignFormState["performanceGoal"],
-    pixelId: node.promoted_object?.pixel_id || "",
-    conversionEvent: (node.promoted_object?.custom_event_type || state.conversionEvent) as ConversionEvent,
-    campaignBidStrategy: strategy,
-    costPerResultGoal: capStrategies.has(strategy) ? fromMinorUnits(node.bid_amount) : "",
-    roasGoal:
-      strategy === "LOWEST_COST_WITH_MIN_ROAS" && roasFloor ? String(roasFloor / 10000) : "",
-    attributionClickDays: windowDays(node.attribution_spec, "CLICK_THROUGH") as AttributionClickDays,
-    attributionViewDays: windowDays(node.attribution_spec, "VIEW_THROUGH") as AttributionViewDays,
-    attributionEngagedViewDays: windowDays(
-      node.attribution_spec,
-      "ENGAGED_VIDEO_VIEW"
-    ) as AttributionEngagedViewDays,
-    dailyBudget: cbo ? state.dailyBudget : fromMinorUnits(node.daily_budget),
-    scheduleStart: node.start_time || "",
-    scheduleEnd: node.stop_time || "",
-    scheduleTimeBasis: node.schedule_time_basis || state.scheduleTimeBasis,
-    locations: targeting.geo_locations?.countries || [],
-    ageMin: targeting.age_min ?? state.ageMin,
-    ageMax: targeting.age_max ?? state.ageMax,
-    gender: genderFromCodes(targeting.genders),
-    customAudiences: targeting.custom_audiences || [],
-    excludedCustomAudiences: targeting.excluded_custom_audiences || [],
-    detailedTargeting: fromFlexibleSpec(targeting.flexible_spec),
-    targetingExpansion: targeting.targeting_optimization === "expansion_all",
-    placementMode: (targeting.publisher_platforms?.length ? "manual" : "advantage") as PlacementMode,
-    publisherPlatforms: (targeting.publisher_platforms?.length
-      ? targeting.publisher_platforms
-      : state.publisherPlatforms) as PublisherPlatform[],
-    advertiser: (node.advertiser ?? null) as AdvertiserEntity,
-    payer: (node.payer ?? null) as AdvertiserEntity,
+    nodeId: node.id,
+    level,
+    metaId: node.id.startsWith("local:") ? undefined : node.id,
+    parentNodeId: level === "adset" ? node.campaign_id : level === "ad" ? node.adset_id : undefined,
+    name: node.name,
+    objective: node.objective,
+    specialAdCategories: node.special_ad_categories,
+    dailyBudget: node.daily_budget,
+    lifetimeBudget: node.lifetime_budget,
+    bidStrategy: node.bid_strategy,
+    bidAmount: node.bid_amount,
+    bidConstraints: node.bid_constraints?.roas_average_floor == null ? undefined : { roas_average_floor: node.bid_constraints.roas_average_floor },
+    targeting: node.targeting,
+    optimizationGoal: node.optimization_goal,
+    billingEvent: node.billing_event,
+    startTime: node.start_time,
+    endTime: node.end_time || node.stop_time,
+    destinationType: node.destination_type,
+    promotedObject: node.promoted_object,
+    attributionSpec: node.attribution_spec,
+    dsaBeneficiary: node.advertiser?.id,
+    dsaPayor: node.payer?.id,
+    pageId: node.page_id,
+    imageHash: node.image_hash,
+    videoId: node.video_id || creative?.video_id,
+    thumbnailUrl: node.thumb_url || creative?.thumbnail_url,
+    title: node.headline || creative?.title,
+    body: node.primaryText || creative?.body,
+    description: node.description,
+    cta: node.cta,
+    linkUrl: node.link,
+    primaryTextVariations: node.primary_text_variations,
+    headlineVariations: node.headline_variations,
+    descriptionVariations: node.description_variations,
+    creativeId: node.portal_creative_id,
+    creativeThumb: node.thumb_url || creative?.thumbnail_url,
   }
 }
 
-function applyAd(state: CampaignFormState, node: WorkspaceNode): CampaignFormState {
-  return {
-    ...state,
-    adName: node.name,
-    pageId: node.page_id || "",
-    instagramId: node.instagram_id || "",
-    creativeId: node.portal_creative_id || "",
-    creativeFileName: node.creative_file_name || "",
-    creativePreviewUrl: node.thumb_url || "",
-    mediaUrl: node.media_url || "",
-    mediaType: (node.media_type || state.mediaType) as MediaType,
-    creativeIds: node.creative_ids || [],
-    selectedCreatives: node.selected_creatives || [],
-    oneAdPerAdset: Boolean(node.one_ad_per_adset),
-    primaryText: node.primaryText || "",
-    primaryTextVariations: node.primary_text_variations || [],
-    headline: node.headline || "",
-    headlineVariations: node.headline_variations || [],
-    description: node.description || "",
-    descriptionVariations: node.description_variations || [],
-    callToAction: node.cta || state.callToAction,
-    destinationUrl: node.link || "",
-    urlParameters: node.url_parameters || "",
-  }
-}
+/**
+ * Build the route payload. `nodes` are new or edited hierarchy entries to materialize/update.
+ * `contextParents` are already-existing ancestors included only to satisfy the route's
+ * "every parentNodeId must resolve within this request" rule — they are sent with
+ * `contextOnly: true` so the route resolves their Meta ID without writing to them.
+ */
+export function workspaceDraftsToMaterializeNodes(
+  nodes: Array<{ node: WorkspaceNode; level: DraftLevel }>,
+  contextParents: Array<{ node: WorkspaceNode; level: DraftLevel }> = [],
+): MaterializeNode[] {
+  const order: Record<DraftLevel, number> = { campaign: 0, adset: 1, ad: 2 }
+  const sortedNew = [...nodes].sort((a, b) => order[a.level] - order[b.level])
+  const sortedContext = [...contextParents].sort((a, b) => order[a.level] - order[b.level])
 
-/** Convenience for the round-trip property and for rehydrating after a discard. */
-export function applyDraftHierarchy(
-  state: CampaignFormState,
-  nodes: DraftHierarchy
-): CampaignFormState {
-  let next = applyCampaign(state, nodes.campaign)
-  next = applyAdSet(next, nodes.adset)
-  return applyAd(next, nodes.ad)
+  const context = sortedContext.map(({ node, level }) => ({
+    ...materializeNode(node, level),
+    metaId: node.id,
+    contextOnly: true,
+  }))
+  const created = sortedNew.map(({ node, level }) => materializeNode(node, level))
+
+  return [...context, ...created]
 }

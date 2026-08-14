@@ -5,6 +5,7 @@ import {
   IconChevronDown, IconDownload, IconHistory, IconLoader2, IconPlus, IconCalendar,
   IconSettings, IconX, IconDots, IconMessageCircle, IconChartLine, IconPencil,
   IconEye, IconLayoutSidebarLeftCollapse, IconLayoutSidebarLeftExpand, IconListCheck,
+  IconArrowLeft,
 } from "@tabler/icons-react"
 import {
   Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer,
@@ -24,6 +25,18 @@ import {
   loadEditorDrafts,
   saveEditorDrafts,
 } from "@/lib/editor-drafts"
+import { workspaceDraftsToMaterializeNodes, type DraftLevel } from "@/lib/workspace-draft-adapter"
+import {
+  anchorExistingNode,
+  appendCreatedNode,
+  createSessionCreatedLedger,
+  findLedgerNode,
+  markDeleted,
+  pendingDeletes,
+  remapCreatedNode,
+  setBatchId,
+  type SessionCreatedLedger,
+} from "@/lib/session-created-ledger"
 
 type Tab = "trends" | "breakdowns"
 
@@ -181,6 +194,81 @@ function cardsForLevel(level: Level) {
 }
 
 // ── Sidebar tree node action menu (Meta-style) ──────────────────────────────
+/**
+ * Hierarchy "Create". Ad set and ad are staged inside the editor (BL-64 `createWorkspaceChild`),
+ * so the buyer keeps the workspace and its drafts; only a new campaign has to leave for the
+ * create flow, because a campaign has no parent in this tree to hang off.
+ */
+function CreateMenuItem({ label, hint, onClick }: { label: string; hint: string; onClick?: () => void }) {
+  return (
+    <button
+      type="button"
+      disabled={!onClick}
+      onClick={onClick}
+      className={cn(
+        "w-full px-3 py-2 text-left hover:bg-muted/50",
+        !onClick && "opacity-40 cursor-not-allowed hover:bg-transparent",
+      )}
+    >
+      <span className="block text-xs font-medium">{label}</span>
+      <span className="block text-[10px] leading-4 text-muted-foreground">{hint}</span>
+    </button>
+  )
+}
+
+function HierarchyCreateMenu({ disabled, onCreateCampaign, onCreateAdSet, onCreateAd }: {
+  disabled?: boolean
+  onCreateCampaign?: () => void
+  onCreateAdSet?: () => void
+  onCreateAd?: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
+    document.addEventListener("mousedown", h)
+    return () => document.removeEventListener("mousedown", h)
+  }, [open])
+  const pick = (handler?: () => void) => handler ? () => { handler(); setOpen(false) } : undefined
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen(o => !o)}
+        className="h-8 px-2.5 text-xs rounded-md bg-primary text-primary-foreground font-medium hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <IconPlus className="size-3.5 inline mr-1" /> Create
+      </button>
+      {open && (
+        <div role="menu" className="absolute right-0 top-9 z-50 w-60 overflow-hidden rounded-lg border bg-background py-1 shadow-xl">
+          <p className="px-3 py-1 text-[10px] uppercase text-muted-foreground">Create in this workspace</p>
+          <div className="my-1 border-t" />
+          <CreateMenuItem
+            label="Ad set"
+            hint={onCreateAdSet ? "Staged under this campaign — Save Draft creates it paused on Meta." : "Open a campaign first."}
+            onClick={pick(onCreateAdSet)}
+          />
+          <CreateMenuItem
+            label="Ad"
+            hint={onCreateAd ? "Staged under this ad set — Save Draft creates it paused on Meta." : "Open an ad set first."}
+            onClick={pick(onCreateAd)}
+          />
+          <div className="my-1 border-t" />
+          <CreateMenuItem
+            label="Campaign"
+            hint="Leaves the editor and opens the create flow."
+            onClick={pick(onCreateCampaign)}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
 function NodeActionMenu({ level, id, onDuplicate, onDelete, onEdit, onViewHistory, onSeeHistory }: {
   level: string; id: string
   onDuplicate?: (id: string) => void
@@ -362,6 +450,18 @@ export function PerformancePopup({
     message?: string
   }>>([])
   const [workspacePublishing, setWorkspacePublishing] = useState(false)
+  const [savingWorkspaceDraft, setSavingWorkspaceDraft] = useState(false)
+  /** Set by the first Save Draft that materializes an ad; reused so the session keeps one batch row. */
+  const [workspaceBatchId, setWorkspaceBatchId] = useState<string | undefined>(undefined)
+  const [workspaceMaterializeError, setWorkspaceMaterializeError] = useState("")
+  /**
+   * What this browser session created on Meta via Save Draft — the only thing "Delete drafts on
+   * Meta" is allowed to delete. Pre-existing parents enter it as anchors, which `pendingDeletes`
+   * excludes, so a live campaign can never be removed by discarding a session.
+   */
+  const [sessionLedger, setSessionLedger] = useState<SessionCreatedLedger>(createSessionCreatedLedger)
+  const [discardingOnMeta, setDiscardingOnMeta] = useState(false)
+  const metaDraftCount = pendingDeletes(sessionLedger).length
   const [workspaceDiscardConfirm, setWorkspaceDiscardConfirm] = useState(false)
   const workspaceDirty = Object.keys(workspaceDrafts).length > 0
   const historyRef = useRef<HTMLDivElement>(null)
@@ -451,7 +551,8 @@ export function PerformancePopup({
   }
 
   const updateWorkspaceDraft = useCallback((node: WorkspaceNode, nodeLevel: Level) => {
-    setWorkspaceDrafts(current => ({ ...current, [`${nodeLevel}:${node.id}`]: node }))
+    // Editing the node invalidates the previous Save Draft failure — it described the old payload.
+    setWorkspaceDrafts(current => ({ ...current, [`${nodeLevel}:${node.id}`]: { ...node, materializeError: undefined } }))
     setWorkspacePublishResults([])
   }, [])
 
@@ -465,6 +566,201 @@ export function PerformancePopup({
     })
     setWorkspacePublishResults([])
   }, [])
+
+  // ── BL-64 · synthetic children + Save Draft materialization ────────────────
+  // A child added here is local-only until Save Draft: its id is `local:*`, it lives in
+  // workspaceDrafts like every other staged node, and it also joins localAdSets/localAds so the
+  // hierarchy tree can show and select it. Save Draft turns it into a real PAUSED Meta object via
+  // POST /api/ads-manager/workspace-materialize, then the local id is remapped to the Meta id.
+  const createWorkspaceChild = useCallback((parentLevel: Level, parentId: string, parentCampaignId?: string) => {
+    if (parentLevel !== "campaign" && parentLevel !== "adset") return
+    const childLevel: Level = parentLevel === "campaign" ? "adset" : "ad"
+    const nodeId = `local:${childLevel}:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+    const name = childLevel === "adset" ? "New ad set" : "New ad"
+    const child: WorkspaceNode = childLevel === "adset"
+      ? { id: nodeId, name, status: "PAUSED", campaign_id: parentId }
+      : { id: nodeId, name, status: "PAUSED", adset_id: parentId, campaign_id: parentCampaignId }
+
+    if (childLevel === "adset") {
+      setLocalAdSets(current => [...current, { id: nodeId, name, status: "PAUSED", campaign_id: parentId }])
+    } else {
+      setLocalAds(current => [...current, { id: nodeId, name, status: "PAUSED", adset_id: parentId, campaign_id: parentCampaignId }])
+    }
+    setWorkspaceDrafts(current => ({ ...current, [`${childLevel}:${nodeId}`]: child }))
+
+    // Record it so Discard can reverse it on Meta later. The parent enters as an anchor only when
+    // it is not something this session created — anchors are never deleted.
+    setSessionLedger(current => {
+      const known = findLedgerNode(current, parentId)
+      const withParent = known
+        ? current
+        : anchorExistingNode(current, { nodeId: parentId, level: parentLevel, metaId: parentId })
+      return appendCreatedNode(withParent, {
+        nodeId,
+        level: childLevel,
+        parentNodeId: known?.nodeId ?? parentId,
+      })
+    })
+
+    setWorkspacePublishResults([])
+    selectNode(nodeId, childLevel)
+    setWorkspaceView("edit")
+  }, [])
+
+  /** Replace a local node id with the Meta id the route just returned, everywhere it is referenced. */
+  const remapLocalNodeId = useCallback((localId: string, metaId: string, nodeLevel: Level) => {
+    const rewriteRow = <T extends { id?: string; campaign_id?: string; adset_id?: string }>(row: T): T => {
+      if (!row) return row
+      const next = { ...row }
+      if (next.id === localId) next.id = metaId
+      if (next.campaign_id === localId) next.campaign_id = metaId
+      if (next.adset_id === localId) next.adset_id = metaId
+      return next
+    }
+    setLocalAdSets(current => current.map(rewriteRow))
+    setLocalAds(current => current.map(rewriteRow))
+    setWorkspaceDrafts(current => Object.fromEntries(
+      Object.entries(current).map(([key, node]) => [
+        key === `${nodeLevel}:${localId}` ? `${nodeLevel}:${metaId}` : key,
+        rewriteRow(node),
+      ])
+    ))
+    setActiveNodeId(current => current === localId ? metaId : current)
+  }, [])
+
+  const saveWorkspaceDraft = async () => {
+    const entries = Object.entries(workspaceDrafts)
+    if (!entries.length || savingWorkspaceDraft || workspacePublishing || !accountId) return
+    setSavingWorkspaceDraft(true)
+    setWorkspaceMaterializeError("")
+    try {
+      const staged = entries.map(([key, node]) => ({ node, level: key.split(":")[0] as DraftLevel }))
+      const stagedIds = new Set(staged.map(({ node }) => node.id))
+
+      // Existing ancestors the route needs only so a child's parentNodeId resolves. Sent as
+      // contextOnly, so they are read for their Meta id and never written to.
+      const contextParents: Array<{ node: WorkspaceNode; level: DraftLevel }> = []
+      const seenParents = new Set<string>()
+      for (const { node, level } of staged) {
+        const parentId = level === "adset" ? node.campaign_id : level === "ad" ? node.adset_id : undefined
+        if (!parentId || parentId.startsWith("local:") || stagedIds.has(parentId) || seenParents.has(parentId)) continue
+        const parentLevel: DraftLevel = level === "adset" ? "campaign" : "adset"
+        const listRow = parentLevel === "campaign"
+          ? allCampaigns.find(item => item.id === parentId)
+          : allAdSets.find(item => item.id === parentId)
+        const parentNode = workspaceDetails[`${parentLevel}:${parentId}`]
+          || (listRow as WorkspaceNode | undefined)
+          || { id: parentId, name: parentId }
+        seenParents.add(parentId)
+        contextParents.push({ node: parentNode, level: parentLevel })
+      }
+
+      const response = await fetch("/api/ads-manager/workspace-materialize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          adAccountId: accountId,
+          batchId: workspaceBatchId,
+          nodes: workspaceDraftsToMaterializeNodes(staged, contextParents),
+        }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || "Failed to save draft to Meta")
+      if (data.batchId) {
+        setWorkspaceBatchId(data.batchId as string)
+        setSessionLedger(current => setBatchId(current, data.batchId as string))
+      }
+      if (data.auditError) setWorkspaceMaterializeError(data.auditError as string)
+
+      const results: Array<{ nodeId: string; level: DraftLevel; metaId?: string; status: string; message?: string }> =
+        Array.isArray(data.results) ? data.results : []
+      for (const result of results) {
+        const key = `${result.level}:${result.nodeId}`
+        if (result.status === "materialized" && result.metaId) {
+          remapLocalNodeId(result.nodeId, result.metaId, result.level as Level)
+          // The ledger keeps its own local nodeId as the key and only learns the Meta id, so the
+          // parent chain recorded at create time survives the rename in the tree.
+          setSessionLedger(current => {
+            const tracked = findLedgerNode(current, result.nodeId)
+            if (!tracked || tracked.anchor || tracked.metaId || tracked.nodeId !== result.nodeId) return current
+            return remapCreatedNode(current, result.nodeId, result.metaId as string)
+          })
+          setWorkspaceDrafts(current => {
+            const metaKey = `${result.level}:${result.metaId}`
+            const node = current[metaKey]
+            if (!node) return current
+            return { ...current, [metaKey]: { ...node, materializeError: undefined } }
+          })
+        } else if (result.status === "updated") {
+          setWorkspaceDrafts(current => (
+            current[key] ? { ...current, [key]: { ...current[key], materializeError: undefined } } : current
+          ))
+        } else if (result.status === "failed" || result.status === "skipped") {
+          setWorkspaceDrafts(current => (
+            current[key]
+              ? { ...current, [key]: { ...current[key], materializeError: result.message || "Save Draft failed on Meta." } }
+              : current
+          ))
+        }
+      }
+      onPublished?.()
+    } catch (error) {
+      setWorkspaceMaterializeError(error instanceof Error ? error.message : "Save Draft failed")
+    } finally {
+      setSavingWorkspaceDraft(false)
+    }
+  }
+
+  /**
+   * The reverse of Save Draft: delete on Meta what this session created there, children first.
+   * Only ledger nodes are sent — anchors (parents that existed before) are excluded by
+   * `pendingDeletes`, so a live campaign the buyer did not create here can never be deleted.
+   * A node whose delete fails stays in the ledger, so the button can be pressed again to retry.
+   */
+  const discardWorkspaceOnMeta = async () => {
+    const pending = pendingDeletes(sessionLedger)
+    if (!pending.length || discardingOnMeta || savingWorkspaceDraft || workspacePublishing || !accountId) return
+    setDiscardingOnMeta(true)
+    setWorkspaceMaterializeError("")
+    try {
+      const response = await fetch("/api/facebook/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // Order matters: pendingDeletes returns children before parents and the route deletes
+        // sequentially in the order given.
+        body: JSON.stringify({ adAccountId: accountId, ids: pending.map(node => node.metaId) }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || "Failed to delete drafts on Meta")
+
+      const deleted = new Set<string>(
+        (Array.isArray(data.results) ? data.results : [])
+          .filter((result: { success?: boolean }) => result.success)
+          .map((result: { id: string }) => result.id)
+      )
+      const removedNodes = pending.filter(node => node.metaId && deleted.has(node.metaId))
+      const removedIds = new Set(removedNodes.map(node => node.metaId as string))
+      if (!removedNodes.length) throw new Error("Meta rejected every delete — nothing was removed.")
+
+      setSessionLedger(current => removedNodes.reduce(
+        (ledger, node) => markDeleted(ledger, node.nodeId),
+        current,
+      ))
+      setWorkspaceDrafts(current => Object.fromEntries(
+        Object.entries(current).filter(([, node]) => !removedIds.has(node.id))
+      ))
+      setLocalAdSets(current => current.filter(row => !removedIds.has(String(row.id))))
+      setLocalAds(current => current.filter(row => !removedIds.has(String(row.id))))
+      setActiveNodeId(current => current && removedIds.has(current) ? null : current)
+      setWorkspacePublishResults([])
+      if (data.failed) setWorkspaceMaterializeError(`${data.failed} object(s) could not be deleted on Meta. Press again to retry.`)
+      onPublished?.()
+    } catch (error) {
+      setWorkspaceMaterializeError(error instanceof Error ? error.message : "Delete on Meta failed")
+    } finally {
+      setDiscardingOnMeta(false)
+    }
+  }
 
   const requestWorkspaceClose = () => {
     if (unifiedWorkspace && workspaceDirty) {
@@ -503,6 +799,17 @@ export function PerformancePopup({
   const publishWorkspaceChanges = async () => {
     const entries = Object.entries(workspaceDrafts)
     if (!entries.length || workspacePublishing) return
+    // Publish edits live Meta objects. A local-only node has no Meta id yet — Save Draft creates it.
+    const unmaterialized = entries.filter(([, node]) => node.id.startsWith("local:"))
+    if (unmaterialized.length) {
+      setWorkspacePublishResults(unmaterialized.map(([key, node]) => ({
+        id: node.id,
+        level: key.split(":")[0] as Level,
+        status: "failed" as const,
+        message: "This node does not exist on Meta yet. Use Save Draft first — it creates it as PAUSED.",
+      })))
+      return
+    }
     setWorkspacePublishing(true)
     try {
       const response = await fetch("/api/ads-manager/workspace-publish", {
@@ -575,7 +882,9 @@ export function PerformancePopup({
   }, [workspaceDetails, workspaceDrafts])
 
   useEffect(() => {
+    // A `local:` node exists only in this session's drafts — there is nothing on Meta to read.
     if (!unifiedWorkspace || workspaceView !== "edit" || !workspaceDetailId || isCompare) return
+    if (workspaceDetailId.startsWith("local:")) return
     if (workspaceDetails[workspaceDetailKey] && workspaceDetailRefresh === 0) return
 
     let cancelled = false
@@ -1296,6 +1605,17 @@ export function PerformancePopup({
           {/* Body */}
           <div className="flex-1 min-h-0 flex overflow-hidden">
             {unifiedWorkspace && <nav className="w-14 shrink-0 border-r bg-[#1d2d35] px-2 py-3 flex flex-col items-center gap-2" aria-label="Workspace navigation">
+              {/* Leaving the editor goes through the same guard as the Close button — unsaved drafts still warn. */}
+              <button
+                type="button"
+                onClick={requestWorkspaceClose}
+                className="grid size-9 place-items-center rounded-lg text-slate-300 transition-colors hover:bg-white/10 hover:text-white"
+                aria-label="Back to Ads Manager"
+                title="Back to Ads Manager"
+              >
+                <IconArrowLeft className="size-4.5" />
+              </button>
+              <div className="mb-1 h-px w-7 bg-white/10" />
               {[
                 { view: "charts" as const, label: "Charts", icon: IconChartLine },
                 { view: "edit" as const, label: "Edit", icon: IconPencil },
@@ -1380,13 +1700,12 @@ export function PerformancePopup({
                         aria-label="Search hierarchy"
                       />
                     </div>
-                    <button
-                      onClick={onCreate}
+                    <HierarchyCreateMenu
                       disabled={!canMutate}
-                      className="h-8 px-2.5 text-xs rounded-md bg-primary text-primary-foreground font-medium hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      <IconPlus className="size-3.5 inline mr-1" /> Create
-                    </button>
+                      onCreateCampaign={onCreate}
+                      onCreateAdSet={activeCampaign ? () => createWorkspaceChild("campaign", activeCampaign.id) : undefined}
+                      onCreateAd={activeAdSet ? () => createWorkspaceChild("adset", activeAdSet.id, activeCampaign?.id) : undefined}
+                    />
                   </div>
                 ) : (
                   <div className="flex items-center gap-1 mb-3">
@@ -1509,6 +1828,14 @@ export function PerformancePopup({
                 onPublish={() => {
                   void publishWorkspaceChanges()
                 }}
+                onCreateChild={activeId && (activeNodeLevel === "campaign" || activeNodeLevel === "adset")
+                  ? () => createWorkspaceChild(activeNodeLevel, activeId, activeCampaign?.id)
+                  : undefined}
+                onSaveDraft={() => { void saveWorkspaceDraft() }}
+                savingDraft={savingWorkspaceDraft}
+                onDiscardOnMeta={() => { void discardWorkspaceOnMeta() }}
+                metaDraftCount={metaDraftCount}
+                discardingOnMeta={discardingOnMeta}
                 publishing={workspacePublishing}
                 draftCount={Object.keys(workspaceDrafts).length}
                 onTogglePanel={unifiedWorkspace ? () => setSidebarOpen(open => !open) : undefined}
@@ -1526,8 +1853,15 @@ export function PerformancePopup({
                     </h3>
                   </div>
                   <p className="text-sm text-muted-foreground">
-                    Meta is not updated until you publish. Publish runs Campaign → Ad Set → Ad. A failed parent skips descendants; successful changes are not rolled back.
+                    Edits to live objects reach Meta only on Publish. Save Draft is different: it creates any new node
+                    as a real Meta object, always PAUSED, and records it in Launch History. Both run
+                    Campaign → Ad Set → Ad; a failed parent skips its descendants and successful writes are not rolled back.
                   </p>
+                  {workspaceMaterializeError && (
+                    <p className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+                      {workspaceMaterializeError}
+                    </p>
+                  )}
                   <div className="mt-4 space-y-2">
                     {Object.entries(workspaceDrafts).length === 0 ? (
                       <p className="rounded-lg border bg-muted/20 px-3 py-6 text-center text-sm text-muted-foreground">No staged drafts.</p>
@@ -1559,6 +1893,7 @@ export function PerformancePopup({
                               <li key={label}>· {label}</li>
                             ))}
                           </ul>
+                          {node.materializeError && <p className="mt-1 text-xs text-red-600">Save Draft: {node.materializeError}</p>}
                           {result?.message && <p className="mt-1 text-xs text-red-600">{result.message}</p>}
                         </div>
                       )
@@ -1571,10 +1906,27 @@ export function PerformancePopup({
                         setWorkspaceDrafts({})
                         if (accountId) clearEditorDrafts(accountId)
                         setWorkspacePublishResults([])
+                        // Local-only nodes have no Meta object behind them; drop their tree rows too.
+                        setLocalAdSets(current => current.filter(row => !String(row.id).startsWith("local:")))
+                        setLocalAds(current => current.filter(row => !String(row.id).startsWith("local:")))
+                        setWorkspaceMaterializeError("")
                       }}
-                      disabled={workspacePublishing || Object.keys(workspaceDrafts).length === 0}
+                      disabled={workspacePublishing || savingWorkspaceDraft || Object.keys(workspaceDrafts).length === 0}
                       className="h-9 rounded-lg border px-3 text-sm hover:bg-muted/50 disabled:opacity-40"
-                    >Discard drafts</button>
+                      title="Clears staged edits in this browser. Objects already created on Meta by Save Draft are not deleted."
+                    >Discard local edits</button>
+                    <button
+                      onClick={() => { void discardWorkspaceOnMeta() }}
+                      disabled={!canMutate || discardingOnMeta || savingWorkspaceDraft || workspacePublishing || metaDraftCount === 0}
+                      className="h-9 rounded-lg border border-red-200 px-3 text-sm text-red-700 hover:bg-red-50 disabled:opacity-40 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/30"
+                      title="Deletes on Meta the PAUSED objects Save Draft created in this session. Objects that existed before are never touched."
+                    >{discardingOnMeta ? "Deleting…" : `Delete ${metaDraftCount} draft(s) on Meta`}</button>
+                    <button
+                      onClick={() => { void saveWorkspaceDraft() }}
+                      disabled={!canMutate || savingWorkspaceDraft || workspacePublishing || Object.keys(workspaceDrafts).length === 0}
+                      className="h-9 rounded-lg border px-3 text-sm hover:bg-muted/50 disabled:opacity-40"
+                      title="Creates new nodes on Meta as PAUSED and records them in Launch History."
+                    >{savingWorkspaceDraft ? "Saving…" : "Save Draft"}</button>
                     <button
                       onClick={() => {
                         if (structuralReplacement) {
@@ -1605,7 +1957,17 @@ export function PerformancePopup({
                         Objective, buying type, special category, or conversion location changed. Meta requires a replacement hierarchy; the existing hierarchy will remain untouched.
                       </li>
                     )}
-                    <li className="rounded-lg border px-3 py-2">Staged drafts match Quick edit: nothing hits Meta until Publish.</li>
+                    {Object.values(workspaceDrafts).some(node => node.id.startsWith("local:")) && (
+                      <li className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800">
+                        Some nodes exist only in this session. Publish edits live objects — run Save Draft first to create them on Meta as PAUSED.
+                      </li>
+                    )}
+                    {metaDraftCount > 0 && (
+                      <li className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800">
+                        {metaDraftCount} object(s) created in this session already exist on Meta as PAUSED. &ldquo;Discard local edits&rdquo; leaves them there — use &ldquo;Delete {metaDraftCount} draft(s) on Meta&rdquo; to remove them.
+                      </li>
+                    )}
+                    <li className="rounded-lg border px-3 py-2">Edits to live objects stay local until Publish; a node created with Save Draft already exists on Meta and stays PAUSED until you activate it.</li>
                     <li className="rounded-lg border px-3 py-2">Hierarchy nodes with unpublished edits show a green marker in the sidebar.</li>
                   </ul>
                 </section>
@@ -2152,6 +2514,11 @@ export function PerformancePopup({
               <div className="w-full max-w-md rounded-xl border bg-background p-5 shadow-2xl">
                 <h3 className="font-semibold">Discard staged changes?</h3>
                 <p className="mt-2 text-sm text-muted-foreground">Your staged changes will be lost, including the copy kept for this browser tab. Published changes are not affected.</p>
+                {metaDraftCount > 0 && (
+                  <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    {metaDraftCount} object(s) Save Draft created already exist on Meta as PAUSED and will remain there. Delete them from the review screen first if you do not want them.
+                  </p>
+                )}
                 <div className="mt-5 flex justify-end gap-2">
                   <button onClick={() => setWorkspaceDiscardConfirm(false)} className="h-9 rounded-lg border px-3 text-sm hover:bg-muted/50">Keep editing</button>
                   <button

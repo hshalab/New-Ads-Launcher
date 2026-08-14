@@ -124,6 +124,8 @@ export type WorkspaceNode = {
   media_type?: "image" | "video"
   one_ad_per_adset?: boolean
   url_parameters?: string
+  /** Most recent Save Draft failure. Cleared when this node changes or materializes. */
+  materializeError?: string
 }
 
 type HierarchyPath = {
@@ -156,6 +158,19 @@ type Props = {
   publishing?: boolean
   /** Total staged drafts across every node, shown on Publish so the count is the same at all three levels. */
   draftCount?: number
+  /** Add a synthetic local child under this node — ad set under a campaign, ad under an ad set. */
+  onCreateChild?: () => void
+  /** Materialize new/changed hierarchy as real, PAUSED Meta objects. Distinct from Publish. */
+  onSaveDraft?: () => void
+  savingDraft?: boolean
+  /**
+   * Reverse of Save Draft: delete on Meta the objects this session created there. Deliberately a
+   * separate control from "Discard local edit" — one clears this browser, this one deletes on Meta.
+   */
+  onDiscardOnMeta?: () => void
+  /** How many Meta objects this session created and can still delete. 0 → the control is disabled. */
+  metaDraftCount?: number
+  discardingOnMeta?: boolean
   /** Hierarchy panel control, hoisted into the shared top chrome. Omitted → no button rendered. */
   onTogglePanel?: () => void
   panelOpen?: boolean
@@ -506,6 +521,12 @@ export function UnifiedWorkspaceEditor({
   onPublish,
   publishing = false,
   draftCount = 0,
+  onCreateChild,
+  onSaveDraft,
+  savingDraft = false,
+  onDiscardOnMeta,
+  metaDraftCount = 0,
+  discardingOnMeta = false,
   onTogglePanel,
   panelOpen = false,
   panelDisabled = false,
@@ -902,9 +923,19 @@ export function UnifiedWorkspaceEditor({
                   <button type="button" className="block w-full cursor-not-allowed px-3 py-2 text-left text-xs text-muted-foreground opacity-50" disabled>
                     Duplicate · soon
                   </button>
-                  <button type="button" className="block w-full cursor-not-allowed px-3 py-2 text-left text-xs text-muted-foreground opacity-50" disabled>
-                    Create ad · soon
-                  </button>
+                  {(level === "campaign" || level === "adset") && (
+                    <button
+                      type="button"
+                      className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/50 disabled:opacity-40"
+                      disabled={readOnly || !onCreateChild}
+                      onClick={() => {
+                        setMenuOpen(false)
+                        onCreateChild?.()
+                      }}
+                    >
+                      {level === "campaign" ? "Create ad set" : "Create ad"}
+                    </button>
+                  )}
                   <button type="button" className="block w-full cursor-not-allowed px-3 py-2 text-left text-xs text-muted-foreground opacity-50" disabled>
                     Create rule · soon
                   </button>
@@ -1807,9 +1838,32 @@ export function UnifiedWorkspaceEditor({
             variant="outline"
             onClick={onDiscard}
             disabled={!hasDraft || readOnly || publishing}
+            title="Clears the staged edit in this browser. Nothing on Meta changes."
           >
-            Discard draft
+            Discard local edit
           </Button>
+          {onDiscardOnMeta && (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onDiscardOnMeta}
+              disabled={readOnly || publishing || savingDraft || discardingOnMeta || metaDraftCount === 0}
+              className="border-red-200 text-red-700 hover:bg-red-50 hover:text-red-700 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/30"
+              title="Deletes on Meta the PAUSED objects Save Draft created in this session. Objects that existed before are never touched."
+            >
+              {discardingOnMeta ? "Deleting…" : `Delete ${metaDraftCount} draft${metaDraftCount === 1 ? "" : "s"} on Meta`}
+            </Button>
+          )}
+          {onSaveDraft && (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onSaveDraft}
+              disabled={!hasDraft || readOnly || savingDraft || publishing}
+            >
+              {savingDraft ? "Saving…" : "Save Draft"}
+            </Button>
+          )}
           <Button
             type="button"
             onClick={onPublish}

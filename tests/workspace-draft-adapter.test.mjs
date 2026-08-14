@@ -1,88 +1,36 @@
 /**
- * BL-64 tracer — the adapter that lets the editor render an unpublished hierarchy.
+ * BL-64 — campaign shell adapter (create-new = campaign only).
  *
  * Run: npx tsx --test tests/workspace-draft-adapter.test.mjs
- *
- * The property under test is the one that has actually failed on this codebase: a field the user
- * edits, that never reaches Meta. TD-38 was eight of them at once. Here the guard is a round trip —
- * form → three nodes → form must be the identity for every field the editor owns.
  */
 
 import { test, describe, it } from "node:test"
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 
 import {
-  DRAFT_IDS,
   FIELD_OWNER,
-  applyDraftHierarchy,
-  applyDraftNode,
-  formStateToDraftNodes,
+  applyCampaignShellEdit,
+  formStateToCampaignShell,
   fromMinorUnits,
-  isDraftId,
   toMinorUnits,
+  workspaceDraftsToMaterializeNodes,
 } from "../lib/workspace-draft-adapter.ts"
 import { defaultCampaignState } from "../components/ads-manager/create-flow/types.ts"
 
-/** A state with every field moved off its default, so a dropped field cannot hide behind one. */
-const populated = {
-  ...defaultCampaignState,
+const root = join(dirname(fileURLToPath(import.meta.url)), "..")
+const read = relative => readFileSync(join(root, relative), "utf8")
+
+const shellBase = {
+  existingCampaignId: "",
   campaignName: "Phantom 2.0",
   objective: "OUTCOME_SALES",
   specialAdCategories: ["HOUSING"],
   advantageCampaignBudget: true,
   campaignBudget: "250",
   campaignBidStrategy: "COST_CAP",
-
-  adSetName: "US · PDP-main",
-  conversionLocation: "website",
-  engagementType: null,
-  performanceGoal: "OFFSITE_CONVERSIONS",
-  pixelId: "1234567890",
-  conversionEvent: "ADD_TO_CART",
-  costPerResultGoal: "12.50",
-  roasGoal: "",
-  attributionClickDays: "1",
-  attributionViewDays: "1",
-  attributionEngagedViewDays: "1",
-  dailyBudget: "20",
-  scheduleStart: "2026-08-14T05:06",
-  scheduleEnd: "2026-08-20T05:06",
-  scheduleTimeBasis: "utc",
-  locations: ["US", "CA"],
-  ageMin: 25,
-  ageMax: 54,
-  gender: "FEMALE",
-  customAudiences: [{ id: "aud1", name: "Purchasers 180d" }],
-  excludedCustomAudiences: [{ id: "aud2", name: "Recent buyers" }],
-  detailedTargeting: [{ id: "int1", name: "Home improvement" }],
-  targetingExpansion: false,
-  placementMode: "manual",
-  publisherPlatforms: ["facebook", "instagram"],
-  advertiser: { type: "page", id: "p1", name: "PATI" },
-  payer: { type: "business", id: "b1", name: "PATI Global" },
-
-  adName: "Remake EN v3",
-  pageId: "page-1",
-  instagramId: "ig-1",
-  creativeId: "cr-1",
-  creativeFileName: "remake-en.mp4",
-  creativePreviewUrl: "https://cdn.example.com/thumb.jpg",
-  mediaUrl: "https://cdn.example.com/remake-en.mp4",
-  mediaType: "video",
-  creativeIds: ["cr-1", "cr-2"],
-  selectedCreatives: [
-    { id: "cr-1", file_name: "remake-en.mp4", preview_url: "https://cdn.example.com/t1.jpg", media_type: "video" },
-  ],
-  oneAdPerAdset: true,
-  primaryText: "Primary",
-  primaryTextVariations: ["Primary B"],
-  headline: "Headline",
-  headlineVariations: ["Headline B"],
-  description: "Description",
-  descriptionVariations: ["Description B"],
-  callToAction: "SHOP_NOW",
-  destinationUrl: "https://example.com/pdp",
-  urlParameters: "utm_source=fb",
 }
 
 describe("units", () => {
@@ -94,7 +42,6 @@ describe("units", () => {
   })
 
   it("leaves an empty field empty rather than inventing a zero", () => {
-    // "" and "0" mean different things to Meta: absent vs an explicit zero bid.
     assert.equal(toMinorUnits(""), "")
     assert.equal(toMinorUnits("   "), "")
     assert.equal(fromMinorUnits(undefined), "")
@@ -116,202 +63,219 @@ describe("field ownership", () => {
       )
     }
   })
-})
 
-describe("form → draft nodes", () => {
-  it("builds a three-level hierarchy wired to itself", () => {
-    const { campaign, adset, ad } = formStateToDraftNodes(populated)
-    assert.equal(campaign.id, DRAFT_IDS.campaign)
-    assert.equal(adset.campaign_id, DRAFT_IDS.campaign)
-    assert.equal(ad.adset_id, DRAFT_IDS.adset)
-    assert.equal(ad.campaign_id, DRAFT_IDS.campaign)
-  })
-
-  it("marks draft ids so a route can never mistake one for a Meta id", () => {
-    assert.ok(isDraftId(DRAFT_IDS.campaign))
-    assert.ok(!isDraftId("120210000000000"))
-    assert.ok(!isDraftId(undefined))
-  })
-
-  it("creates the hierarchy paused — nothing starts spending on publish", () => {
-    const nodes = formStateToDraftNodes(populated)
-    for (const node of Object.values(nodes)) assert.equal(node.status, "PAUSED")
-  })
-
-  describe("bidding", () => {
-    it("CBO: strategy on the campaign, cap value on the ad set", () => {
-      const { campaign, adset } = formStateToDraftNodes(populated)
-      assert.equal(campaign.bid_strategy, "COST_CAP")
-      assert.equal(campaign.daily_budget, "25000")
-      assert.equal(adset.bid_strategy, undefined)
-      assert.equal(adset.daily_budget, undefined)
-      // Meta has no campaign-level bid_amount — the number always sits on the ad set.
-      assert.equal(adset.bid_amount, "1250")
-    })
-
-    it("ABO: strategy moves to the ad set, campaign carries no budget or strategy", () => {
-      const { campaign, adset } = formStateToDraftNodes({
-        ...populated,
-        advantageCampaignBudget: false,
-      })
-      assert.equal(campaign.daily_budget, undefined)
-      assert.equal(campaign.bid_strategy, undefined)
-      assert.equal(adset.bid_strategy, "COST_CAP")
-      assert.equal(adset.daily_budget, "2000")
-    })
-
-    it("ROAS goal sends a floor and no bid_amount", () => {
-      const { adset } = formStateToDraftNodes({
-        ...populated,
-        campaignBidStrategy: "LOWEST_COST_WITH_MIN_ROAS",
-        costPerResultGoal: "12.50",
-        roasGoal: "1.5",
-      })
-      // Meta rejects a ROAS floor sent alongside a bid amount.
-      assert.equal(adset.bid_amount, undefined)
-      assert.deepEqual(adset.bid_constraints, { roas_average_floor: 15000 })
-    })
-
-    it("Highest volume carries neither cap nor floor", () => {
-      const { adset } = formStateToDraftNodes({
-        ...populated,
-        campaignBidStrategy: "LOWEST_COST_WITHOUT_CAP",
-      })
-      assert.equal(adset.bid_amount, undefined)
-      assert.equal(adset.bid_constraints, undefined)
-    })
-  })
-
-  describe("targeting", () => {
-    it("Advantage+ placements omit publisher_platforms rather than listing all four", () => {
-      const { adset } = formStateToDraftNodes({ ...populated, placementMode: "advantage" })
-      assert.equal(adset.targeting?.publisher_platforms, undefined)
-    })
-
-    it("manual placements list exactly what was selected", () => {
-      const { adset } = formStateToDraftNodes(populated)
-      assert.deepEqual(adset.targeting?.publisher_platforms, ["facebook", "instagram"])
-    })
-
-    it("maps gender, geo and detailed targeting into the shapes Meta returns", () => {
-      const { adset } = formStateToDraftNodes(populated)
-      assert.deepEqual(adset.targeting?.genders, [2])
-      assert.deepEqual(adset.targeting?.geo_locations, { countries: ["US", "CA"] })
-      assert.deepEqual(adset.targeting?.flexible_spec, [
-        { interests: [{ id: "int1", name: "Home improvement" }] },
-      ])
-      assert.equal(adset.targeting?.targeting_optimization, "none")
-    })
-  })
-
-  it("resolves destination_type from the ODAX row, not from a second table", () => {
-    const { adset } = formStateToDraftNodes(populated)
-    assert.equal(adset.destination_type, "WEBSITE")
-    const engagement = formStateToDraftNodes({
-      ...populated,
-      objective: "OUTCOME_ENGAGEMENT",
-      conversionLocation: "on_your_ad",
-      engagementType: "video_views",
-      performanceGoal: "THRUPLAY",
-    })
-    assert.equal(engagement.adset.destination_type, "ON_VIDEO")
-  })
-
-  it("attaching to an existing campaign points the ad set at the Meta id", () => {
-    const { campaign, adset } = formStateToDraftNodes({
-      ...populated,
-      existingCampaignId: "120210000000000",
-      existingCampaignName: "PPE II Phantom 2.0",
-    })
-    assert.equal(campaign.name, "PPE II Phantom 2.0")
-    assert.equal(campaign.draft_of, "120210000000000")
-    assert.equal(adset.campaign_id, "120210000000000")
+  it("keeps cap/ROAS values on the ad set, not the campaign", () => {
+    assert.equal(FIELD_OWNER.costPerResultGoal, "adset")
+    assert.equal(FIELD_OWNER.roasGoal, "adset")
+    assert.equal(FIELD_OWNER.dailyBudget, "adset")
   })
 })
 
-describe("round trip", () => {
-  it("is lossless for every field the editor owns", () => {
-    const nodes = formStateToDraftNodes(populated)
-    const returned = applyDraftHierarchy(populated, nodes)
-    assert.deepEqual(returned, populated)
+describe("form → campaign shell", () => {
+  it("emits campaign fields only — no ad set or ad keys", () => {
+    const shell = formStateToCampaignShell(shellBase)
+    assert.deepEqual(Object.keys(shell).sort(), [
+      "advantageCampaignBudget",
+      "campaignBidStrategy",
+      "campaignBudget",
+      "name",
+      "objective",
+      "specialAdCategories",
+    ])
+    assert.equal(shell.name, "Phantom 2.0")
+    assert.equal(shell.objective, "OUTCOME_SALES")
+    assert.deepEqual(shell.specialAdCategories, ["HOUSING"])
   })
 
-  it("is lossless for untouched defaults", () => {
-    const nodes = formStateToDraftNodes(defaultCampaignState)
-    assert.deepEqual(applyDraftHierarchy(defaultCampaignState, nodes), defaultCampaignState)
+  it("CBO: includes campaign budget and strategy, never cap/ROAS value", () => {
+    const shell = formStateToCampaignShell(shellBase)
+    assert.equal(shell.advantageCampaignBudget, true)
+    assert.equal(shell.campaignBudget, "250")
+    assert.equal(shell.campaignBidStrategy, "COST_CAP")
+    assert.equal("costPerResultGoal" in shell, false)
+    assert.equal("roasGoal" in shell, false)
+    assert.equal("dailyBudget" in shell, false)
   })
 
-  it("is lossless under ABO, where the strategy lives on the other node", () => {
-    const abo = { ...populated, advantageCampaignBudget: false }
-    assert.deepEqual(applyDraftHierarchy(abo, formStateToDraftNodes(abo)), abo)
+  it("ABO: omits campaign budget and strategy entirely", () => {
+    const shell = formStateToCampaignShell({
+      ...shellBase,
+      advantageCampaignBudget: false,
+      campaignBudget: "999",
+      campaignBidStrategy: "COST_CAP",
+    })
+    assert.equal(shell.advantageCampaignBudget, false)
+    assert.equal(shell.campaignBudget, undefined)
+    assert.equal(shell.campaignBidStrategy, undefined)
   })
 
-  it("is lossless for a ROAS ad set", () => {
-    const roas = {
-      ...populated,
-      campaignBidStrategy: "LOWEST_COST_WITH_MIN_ROAS",
-      costPerResultGoal: "",
-      roasGoal: "1.5",
-    }
-    assert.deepEqual(applyDraftHierarchy(roas, formStateToDraftNodes(roas)), roas)
+  it("defaults blank name to New Campaign", () => {
+    const shell = formStateToCampaignShell({ ...shellBase, campaignName: "   " })
+    assert.equal(shell.name, "New Campaign")
   })
 
-  it("is lossless for Awareness, which has no conversion location at all", () => {
-    const awareness = {
-      ...populated,
-      objective: "OUTCOME_AWARENESS",
-      conversionLocation: null,
-      engagementType: null,
-      performanceGoal: "REACH",
-      pixelId: "",
-      conversionEvent: defaultCampaignState.conversionEvent,
-    }
-    assert.deepEqual(applyDraftHierarchy(awareness, formStateToDraftNodes(awareness)), awareness)
+  it("rejects attach-scope state — shell is create-new only", () => {
+    assert.throws(
+      () =>
+        formStateToCampaignShell({
+          ...shellBase,
+          existingCampaignId: "120210000000000",
+        }),
+      /new campaigns only/i
+    )
+  })
+
+  it("never invents synthetic draft child ids", () => {
+    const shell = formStateToCampaignShell(shellBase)
+    const json = JSON.stringify(shell)
+    assert.equal(json.includes("draft:"), false)
+    assert.equal(json.includes("adset"), false)
+    assert.equal(json.includes("adName"), false)
   })
 })
 
-describe("per-node edits", () => {
-  it("editing the ad set leaves the ad untouched", () => {
-    const nodes = formStateToDraftNodes(populated)
-    const edited = applyDraftNode(populated, { ...nodes.adset, name: "US · renamed" }, "adset")
-    assert.equal(edited.adSetName, "US · renamed")
-    assert.equal(edited.adName, populated.adName)
-    assert.equal(edited.headline, populated.headline)
-    assert.deepEqual(edited.selectedCreatives, populated.selectedCreatives)
+describe("apply campaign shell edit", () => {
+  it("updates campaign fields only", () => {
+    const next = applyCampaignShellEdit(defaultCampaignState, {
+      name: "Renamed",
+      advantageCampaignBudget: true,
+      campaignBudget: "80",
+      campaignBidStrategy: "LOWEST_COST_WITHOUT_CAP",
+      specialAdCategories: ["CREDIT"],
+    })
+    assert.equal(next.campaignName, "Renamed")
+    assert.equal(next.campaignBudget, "80")
+    assert.equal(next.campaignBidStrategy, "LOWEST_COST_WITHOUT_CAP")
+    assert.deepEqual(next.specialAdCategories, ["CREDIT"])
+    // Ad set / ad remain untouched
+    assert.equal(next.adSetName, defaultCampaignState.adSetName)
+    assert.equal(next.adName, defaultCampaignState.adName)
+    assert.equal(next.dailyBudget, defaultCampaignState.dailyBudget)
+    assert.equal(next.costPerResultGoal, defaultCampaignState.costPerResultGoal)
   })
 
-  it("editing the campaign leaves ad set targeting untouched", () => {
-    const nodes = formStateToDraftNodes(populated)
-    const edited = applyDraftNode(populated, { ...nodes.campaign, name: "Renamed" }, "campaign")
-    assert.equal(edited.campaignName, "Renamed")
-    assert.deepEqual(edited.locations, populated.locations)
-    assert.equal(edited.gender, populated.gender)
-  })
-
-  it("attach scope: the campaign name is Meta's and the editor cannot rewrite it", () => {
-    const attached = {
-      ...populated,
-      existingCampaignId: "120210000000000",
-      existingCampaignName: "PPE II Phantom 2.0",
+  it("ABO toggle keeps previous campaign budget so flipping CBO back can restore it", () => {
+    const cbo = {
+      ...defaultCampaignState,
+      advantageCampaignBudget: true,
+      campaignBudget: "250",
+      campaignBidStrategy: "COST_CAP",
     }
-    const nodes = formStateToDraftNodes(attached)
-    const edited = applyDraftNode(attached, { ...nodes.campaign, name: "Hacked" }, "campaign")
-    assert.equal(edited.campaignName, attached.campaignName)
-    assert.equal(edited.existingCampaignName, "PPE II Phantom 2.0")
+    const abo = applyCampaignShellEdit(cbo, {
+      name: cbo.campaignName,
+      advantageCampaignBudget: false,
+    })
+    assert.equal(abo.advantageCampaignBudget, false)
+    assert.equal(abo.campaignBudget, "250")
+  })
+})
+
+describe("workspace materialize adapter", () => {
+  const campaign = { id: "campaign-1", name: "Existing campaign", objective: "OUTCOME_SALES" }
+  const adset = {
+    id: "local:adset-1",
+    name: "Draft ad set",
+    campaign_id: "campaign-1",
+    daily_budget: "1250",
+    optimization_goal: "OFFSITE_CONVERSIONS",
+    billing_event: "IMPRESSIONS",
+    bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+    targeting: { age_min: 21 },
+  }
+  const ad = {
+    id: "local:ad-1",
+    name: "Draft ad",
+    adset_id: "local:adset-1",
+    page_id: "page-1",
+    image_hash: "hash-1",
+    primaryText: "Primary text",
+    headline: "Headline",
+    link: "https://example.com",
+    cta: "SHOP_NOW",
+    primary_text_variations: ["Variation"],
+  }
+
+  it("puts context parents first without writing them", () => {
+    const nodes = workspaceDraftsToMaterializeNodes(
+      [{ node: adset, level: "adset" }],
+      [{ node: campaign, level: "campaign" }],
+    )
+
+    assert.deepEqual(nodes.map(node => [node.nodeId, node.level, node.contextOnly]), [
+      ["campaign-1", "campaign", true],
+      ["local:adset-1", "adset", undefined],
+    ])
+    assert.equal(nodes[0].metaId, "campaign-1")
+    assert.equal(nodes[1].parentNodeId, "campaign-1")
   })
 
-  it("switching CBO off on the campaign node moves the budget decision to the ad set", () => {
-    const nodes = formStateToDraftNodes(populated)
-    const edited = applyDraftNode(populated, { ...nodes.campaign, daily_budget: "" }, "campaign")
-    assert.equal(edited.advantageCampaignBudget, false)
-    // The campaign budget the user typed is kept, not zeroed — toggling CBO back must restore it.
-    assert.equal(edited.campaignBudget, populated.campaignBudget)
+  it("orders local hierarchy parent-first and maps only route fields", () => {
+    const nodes = workspaceDraftsToMaterializeNodes([
+      { node: ad, level: "ad" },
+      { node: adset, level: "adset" },
+    ])
+
+    assert.deepEqual(nodes.map(node => node.nodeId), ["local:adset-1", "local:ad-1"])
+    assert.equal(nodes[0].metaId, undefined)
+    assert.equal(nodes[0].dailyBudget, "1250")
+    assert.equal(nodes[0].optimizationGoal, "OFFSITE_CONVERSIONS")
+    assert.equal(nodes[0].billingEvent, "IMPRESSIONS")
+    assert.deepEqual(nodes[0].targeting, { age_min: 21 })
+    assert.equal(nodes[1].parentNodeId, "local:adset-1")
+    assert.equal(nodes[1].imageHash, "hash-1")
+    assert.equal(nodes[1].title, "Headline")
+    assert.equal(nodes[1].body, "Primary text")
+    assert.equal(nodes[1].linkUrl, "https://example.com")
+    assert.deepEqual(nodes[1].primaryTextVariations, ["Variation"])
+    assert.equal("draft_of" in nodes[1], false)
+    assert.equal("creative_file_name" in nodes[1], false)
+  })
+})
+
+describe("campaign shell route", () => {
+  const route = read("app/api/facebook/create-campaign-shell/route.ts")
+
+  it("holds the existing mutation gates before creating the Meta campaign", () => {
+    const createAt = route.indexOf("await createCampaign(")
+    assert.ok(createAt > -1)
+    for (const gate of [
+      "getAuthContext()",
+      "requireRole(ctx)",
+      'getConnectionForAdAccount(ctx.orgId, adAccountId, "write")',
+      "getOrgAdAccountInfo(ctx.orgId, adAccountId, connection.access_token)",
+    ]) {
+      const gateAt = route.indexOf(gate)
+      assert.ok(gateAt > -1 && gateAt < createAt, `${gate} must run before the Meta write`)
+    }
+  })
+
+  it("creates only a paused campaign and invalidates reads after the write", () => {
+    assert.match(route, /status: "PAUSED"/)
+    assert.doesNotMatch(route, /createAdSet|createAd\(/)
+    assert.match(route, /invalidateMetaReadCacheAfterWrite/)
+    assert.match(route, /campaignId: campaign\.id/)
+  })
+
+  it("keeps ABO budget and strategy off the campaign", () => {
+    assert.match(route, /daily_budget: cbo \? campaignBudgetForHelper[\s\S]+: undefined/)
+    assert.match(route, /bid_strategy: cbo \? strategy : undefined/)
   })
 })
 
 test("the adapter never mutates the state it is given", () => {
-  const snapshot = JSON.parse(JSON.stringify(populated))
-  const nodes = formStateToDraftNodes(populated)
-  applyDraftHierarchy(populated, nodes)
-  assert.deepEqual(populated, snapshot)
+  const snapshot = JSON.parse(JSON.stringify(defaultCampaignState))
+  formStateToCampaignShell({
+    existingCampaignId: defaultCampaignState.existingCampaignId,
+    campaignName: defaultCampaignState.campaignName,
+    objective: defaultCampaignState.objective,
+    specialAdCategories: defaultCampaignState.specialAdCategories,
+    advantageCampaignBudget: defaultCampaignState.advantageCampaignBudget,
+    campaignBudget: defaultCampaignState.campaignBudget,
+    campaignBidStrategy: defaultCampaignState.campaignBidStrategy,
+  })
+  applyCampaignShellEdit(defaultCampaignState, {
+    name: "x",
+    advantageCampaignBudget: false,
+  })
+  assert.deepEqual(defaultCampaignState, snapshot)
 })

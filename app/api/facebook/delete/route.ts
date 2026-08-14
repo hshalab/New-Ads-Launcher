@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getAuthContext, getConnectionForAdAccount, isManual, MissingViaError } from "@/lib/auth"
+import { getAuthContext, getConnectionForAdAccount, isManual, MissingViaError, requireRole } from "@/lib/auth"
 import { getResourceAccountId } from "@/lib/facebook"
 import { adAccountBelongsToOrg } from "@/app/api/facebook/_utils"
 import { secureMetaFetch } from "@/lib/meta-secure-fetch"
@@ -14,6 +14,9 @@ export async function POST(request: NextRequest) {
   try {
     const ctx = await getAuthContext()
     if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    // Deletion is destructive and irreversible on Meta — same role bar as the write routes.
+    const denied = requireRole(ctx)
+    if (denied) return denied
 
     const { ids, adAccountId } = await request.json()
     if (!ids?.length) return NextResponse.json({ error: "ids is required" }, { status: 400 })

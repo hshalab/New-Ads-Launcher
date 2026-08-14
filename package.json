@@ -12,6 +12,7 @@
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit",
     "test:e2e": "playwright test",
+    "test:contract": "node --experimental-strip-types --import ./tests/register-ts.mjs --test tests/*.test.mjs",
     "onboard": "node scripts/generate-onboarding.mjs"
   },
   "dependencies": {
