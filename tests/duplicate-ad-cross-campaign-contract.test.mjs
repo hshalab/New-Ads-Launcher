@@ -34,7 +34,8 @@ describe("Duplicate ad cross-campaign destination contract", () => {
     const adSetRoute = read("app/api/facebook/campaigns/duplicate-adsets/route.ts")
     const adRoute = read("app/api/facebook/duplicate/route.ts")
 
-    assert.doesNotMatch(page, /Choose recommendations to apply|Apply recommendations|Apply and duplicate|>\s*Choose destination\s*</)
+    // The recommendation step is back, but the CTAs it once carried are not.
+    assert.doesNotMatch(page, /Apply and duplicate|>\s*Choose destination\s*</)
     assert.match(page, /"Keep in the same ad set"/)
     assert.match(page, /"Copy to another ad set"/)
     assert.match(page, /different ad set or campaign/)
@@ -53,5 +54,49 @@ describe("Duplicate ad cross-campaign destination contract", () => {
     assert.match(adSetRoute, /status_option: statusOption/)
     assert.match(adRoute, /\["ACTIVE", "PAUSED", "INHERITED"\]\.includes\(status_option\)/)
     assert.match(adRoute, /status_option: statusOption/)
+  })
+})
+
+describe("Duplicate wizard contract (recommendation gate → campaign → ad set)", () => {
+  const page = read("app/(dashboard)/ads-manager/page.tsx")
+
+  it("opens on the recommendation step with the tick already on", () => {
+    assert.match(page, /type DuplicateStep = "recommend" \| "campaign" \| "adset" \| "options" \| "gate"/)
+    assert.match(page, /useState\(true\)\r?\n\s*const \[duplicateRec2, setDuplicateRec2\] = useState\(true\)/)
+    assert.match(page, /setDuplicateStep\(tab === "campaigns" \? "options" : "recommend"\)/)
+    assert.match(page, /Choose recommendations to apply/)
+  })
+
+  it("offers only Close and Continue on the recommendation step", () => {
+    const footer = page.slice(page.indexOf('{duplicateStep === "recommend" ? ('), page.indexOf('} : duplicateStep === "campaign" || duplicateStep === "adset" ? ('))
+    assert.match(footer, /Close/)
+    assert.match(footer, /Continue/)
+    assert.doesNotMatch(footer, /Choose destination|Duplicate</)
+  })
+
+  it("sends the applied path to a warning gate instead of publishing immediately", () => {
+    assert.match(page, /setDuplicateStep\(duplicateRecApplied \? "gate" : tab === "ads" \? "campaign" : "options"\)/)
+    assert.match(page, /Nothing has been created on Meta yet/)
+    // The gate must keep the draft escape hatch, not only a publish button.
+    const gateFooter = page.slice(page.indexOf('Nothing has been created on Meta yet'))
+    assert.match(gateFooter, /executeDuplicate\("draft"\)/)
+  })
+
+  it("walks campaign level before ad set level for ad duplicates", () => {
+    assert.match(page, /if \(duplicateStep === "campaign"\) \{\r?\n\s*setDuplicateStep\("adset"\)/)
+    assert.match(page, /if \(duplicateStep === "adset"\) setDuplicateStep\("options"\)/)
+    assert.match(page, /"Which campaign should hold the copies\?"|Which campaign should hold the copies\?/)
+    assert.match(page, /\["original", "Keep in the same campaign"/)
+    assert.match(page, /\["existing", "Copy to another campaign"/)
+    assert.match(page, /\["new", "Create a new campaign"/)
+  })
+
+  it("routes the chosen campaign into the duplicate write", () => {
+    assert.match(page, /targetCampaignIds: duplicateAdCampaignDestination === "new"/)
+    assert.match(page, /newCampaignName: duplicateAdCampaignDestination === "new"/)
+    // An ad set from another campaign is never offered, and "original" is impossible once the campaign moves.
+    assert.match(page, /duplicateAdCampaignDestination !== "existing" \|\| adSet\.campaign_id === duplicateAdCampaignTargetId/)
+    assert.match(page, /if \(duplicateAdCampaignDestination === "new"\) return option === "new"/)
+    assert.match(page, /if \(duplicateAdCampaignDestination === "existing"\) return option !== "original"/)
   })
 })

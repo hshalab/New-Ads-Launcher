@@ -15,6 +15,7 @@ import {
   IconChevronRight as IconDrillRight,
   IconSpeakerphone, IconTarget, IconPhoto, IconExternalLink, IconClipboard, IconX,
   IconAdjustments, IconDownload, IconChartBar, IconInfoCircle, IconSearch,
+  IconSparkles, IconCircleCheck, IconAlertTriangle,
 } from "@tabler/icons-react"
 import dynamic from "next/dynamic"
 import { type Level, type ReportRow } from "@/components/ads-manager/InsightDrawers"
@@ -102,6 +103,8 @@ function downloadCsv(filename: string, rows: Record<string, string | number>[]) 
 type Tab = "campaigns" | "adsets" | "ads"
 type SortDir = "asc" | "desc"
 type DeleteResult = { id: string; success?: boolean; error?: string }
+/** Duplicate always walks campaign level before ad set level; "gate" is the pre-publish warning. */
+type DuplicateStep = "recommend" | "campaign" | "adset" | "options" | "gate"
 
 const STANDARD_ATTR = [
   { key: "1d_click", label: "1-day click", desc: "Conversions counted after an action within 1 day of an ad click." },
@@ -1228,6 +1231,14 @@ function AdsManagerContent() {
   const [duplicateAdSetSearch, setDuplicateAdSetSearch] = useState("")
   const [duplicateNewName, setDuplicateNewName] = useState("")
   const [duplicateDeliveryStatus, setDuplicateDeliveryStatus] = useState<"source" | "paused" | "active">("source")
+  // Duplicate is a wizard: recommendations → campaign level → ad set level → options → publish gate.
+  const [duplicateStep, setDuplicateStep] = useState<DuplicateStep>("options")
+  const [duplicateRec1, setDuplicateRec1] = useState(true)
+  const [duplicateRec2, setDuplicateRec2] = useState(true)
+  // Ad-level duplicates decide the campaign first, then the ad set (`duplicateDestination`).
+  const [duplicateAdCampaignDestination, setDuplicateAdCampaignDestination] = useState<"original" | "existing" | "new">("original")
+  const [duplicateAdCampaignTargetId, setDuplicateAdCampaignTargetId] = useState("")
+  const [duplicateAdCampaignNewName, setDuplicateAdCampaignNewName] = useState("")
   const [savingTemplateId, setSavingTemplateId] = useState<string | null>(null)
   const [actionToast, setActionToast] = useState<{ kind: "success" | "error"; message: string; href?: string } | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
@@ -1361,6 +1372,12 @@ function AdsManagerContent() {
     setDuplicateDeliveryStatus("source")
     setDuplicateAdSetPickerOpen(false)
     setDuplicateAdSetSearch("")
+    setDuplicateStep(tab === "campaigns" ? "options" : "recommend")
+    setDuplicateRec1(true)
+    setDuplicateRec2(true)
+    setDuplicateAdCampaignDestination("original")
+    setDuplicateAdCampaignTargetId("")
+    setDuplicateAdCampaignNewName("")
   }, [tab])
   useEffect(() => {
     if (!duplicateDialogOpen || tab !== "ads" || duplicateDestination !== "existing" || !selectedAccountId) return
@@ -1981,12 +1998,23 @@ function AdsManagerContent() {
   }
 
   // ─── Duplicate ────────────────────────────────────────────────────────────────
-  const canDuplicate = selectedIds.size > 0
-    && (tab === "campaigns"
-      || !((duplicateDestination === "existing" && !duplicateTargetId) || (duplicateDestination === "new" && !duplicateNewName.trim())))
+  // A copy destined for another campaign cannot land in its original ad set — that ad set lives in the source campaign.
+  const canPickAdSetDestination = (option: "original" | "existing" | "new") => {
+    if (tab !== "ads") return true
+    if (duplicateAdCampaignDestination === "new") return option === "new"
+    if (duplicateAdCampaignDestination === "existing") return option !== "original"
+    return true
+  }
+  const campaignStepValid = tab !== "ads"
+    || duplicateAdCampaignDestination === "original"
+    || (duplicateAdCampaignDestination === "existing" ? !!duplicateAdCampaignTargetId : !!duplicateAdCampaignNewName.trim())
+  const adSetStepValid = tab === "campaigns"
+    || !((duplicateDestination === "existing" && !duplicateTargetId) || (duplicateDestination === "new" && !duplicateNewName.trim()))
+  const canDuplicate = selectedIds.size > 0 && campaignStepValid && adSetStepValid
   const sourceAdSetIds = new Set(ads.filter(ad => selectedIds.has(ad.id)).map(ad => ad.adset_id))
   const availableDuplicateAdSetOptions = duplicateAdSetOptions
     .filter(adSet => (adSet.status === "ACTIVE" || adSet.status === "PAUSED") && !sourceAdSetIds.has(adSet.id))
+    .filter(adSet => duplicateAdCampaignDestination !== "existing" || adSet.campaign_id === duplicateAdCampaignTargetId)
     .sort((a, b) => (a.campaign_name || "").localeCompare(b.campaign_name || "") || a.name.localeCompare(b.name))
   const duplicateAdSetSearchTerm = duplicateAdSetSearch.trim().toLowerCase()
   const filteredDuplicateAdSetOptions = duplicateAdSetSearchTerm
@@ -1996,6 +2024,33 @@ function AdsManagerContent() {
       )
     : availableDuplicateAdSetOptions
   const selectedDuplicateAdSet = duplicateAdSetOptions.find(adSet => adSet.id === duplicateTargetId)
+  const selectedDuplicateAdCampaign = campaigns.find(campaign => campaign.id === duplicateAdCampaignTargetId)
+
+  // Master "Apply recommendations" tick — on by default; unticking it opens the destination steps instead.
+  const duplicateRecApplied = tab === "ads" ? duplicateRec1 : (duplicateRec1 && duplicateRec2)
+  const duplicateStepValid = duplicateStep === "campaign"
+    ? campaignStepValid
+    : duplicateStep === "adset"
+      ? adSetStepValid
+      : true
+  const continueDuplicateStep = () => {
+    if (duplicateStep === "recommend") {
+      // Recommendations are visual only, so the applied path skips destination and stops at the publish gate.
+      setDuplicateStep(duplicateRecApplied ? "gate" : tab === "ads" ? "campaign" : "options")
+      return
+    }
+    if (duplicateStep === "campaign") {
+      setDuplicateStep("adset")
+      return
+    }
+    if (duplicateStep === "adset") setDuplicateStep("options")
+  }
+  const backDuplicateStep = () => {
+    if (duplicateStep === "gate") setDuplicateStep(tab === "campaigns" ? "options" : "recommend")
+    else if (duplicateStep === "options") setDuplicateStep(tab === "ads" ? "adset" : "recommend")
+    else if (duplicateStep === "adset") setDuplicateStep("campaign")
+    else if (duplicateStep === "campaign") setDuplicateStep("recommend")
+  }
 
   const executeDuplicate = async (workflow: "draft" | "publish") => {
     if (selectedIds.size === 0 || !selectedAccountId) return
@@ -2077,7 +2132,12 @@ function AdsManagerContent() {
             const ad = node as Ad
             const sourceAdSet = adSets.find(item => item.id === ad.adset_id)
             const d = await postJson("/api/facebook/campaigns/duplicate-adsets", {
-              targetCampaignIds: [ad.campaign_id],
+              targetCampaignIds: duplicateAdCampaignDestination === "new"
+                ? []
+                : [duplicateAdCampaignDestination === "existing" ? duplicateAdCampaignTargetId : ad.campaign_id],
+              newCampaignName: duplicateAdCampaignDestination === "new"
+                ? duplicateAdCampaignNewName.trim() || `${ad.name} Campaign`
+                : undefined,
               adAccountId: selectedAccountId,
               adSetConfigs: [{
                 id: ad.adset_id,
@@ -4703,7 +4763,8 @@ function AdsManagerContent() {
         open={duplicateDialogOpen}
         onOpenChange={open => {
           setDuplicateDialogOpen(open)
-          if (!open) {
+          if (open) setDuplicateStep(tab === "campaigns" ? "options" : "recommend")
+          else {
             setDuplicateAdSetPickerOpen(false)
             setDuplicateAdSetSearch("")
           }
@@ -4713,29 +4774,214 @@ function AdsManagerContent() {
           <DialogHeader className="border-b px-6 py-5 text-left">
             <div className="flex items-start gap-3">
               <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[#e7f3ff] text-[#1877f2]">
-                <IconCopy className="size-5" strokeWidth={1.8} />
+                {duplicateStep === "recommend"
+                  ? <IconSparkles className="size-5" strokeWidth={1.8} />
+                  : <IconCopy className="size-5" strokeWidth={1.8} />}
               </div>
               <div className="min-w-0 space-y-1">
                 <DialogTitle className="text-xl font-semibold tracking-tight text-foreground">
                   Duplicate {tab === "campaigns" ? "Campaign" : tab === "adsets" ? "Ad Set" : "Ad"}
                 </DialogTitle>
                 <DialogDescription className="text-sm text-muted-foreground">
-                  {selectedIds.size} selected. {tab === "campaigns" ? "Choose name and quantity." : "Choose where copies go, then set name and quantity."}
+                  {selectedIds.size} selected. {duplicateStep === "recommend"
+                    ? "Choose recommendations to apply."
+                    : duplicateStep === "campaign"
+                      ? "Step 1 of 2 — choose the campaign."
+                      : duplicateStep === "adset"
+                        ? "Step 2 of 2 — choose the ad set."
+                        : duplicateStep === "gate"
+                          ? "Review before anything is created on Meta."
+                          : tab === "campaigns" ? "Choose name and quantity." : "Set name, quantity and delivery."}
                 </DialogDescription>
               </div>
             </div>
           </DialogHeader>
 
           <div className="max-h-[72vh] space-y-5 overflow-y-auto px-6 py-5">
-            {tab !== "campaigns" ? (
+            {duplicateStep === "recommend" && (
+              <section className="rounded-xl border border-[#dbe7f2] bg-[#f7fbff] p-4 dark:border-blue-900/60 dark:bg-blue-950/20">
+                <label className="flex cursor-pointer items-start gap-3">
+                  <input
+                    type="checkbox"
+                    className="mt-1 size-4 rounded border-gray-300 accent-[#1877f2]"
+                    checked={duplicateRecApplied}
+                    onChange={e => {
+                      setDuplicateRec1(e.target.checked)
+                      if (tab !== "ads") setDuplicateRec2(e.target.checked)
+                    }}
+                  />
+                  <span className="space-y-1">
+                    <span className="block text-sm font-semibold text-foreground">Apply recommendations</span>
+                    <span className="block text-xs leading-5 text-muted-foreground">Suggested improvements are visual only and are not sent to Meta. Untick and continue to choose a destination instead.</span>
+                  </span>
+                </label>
+
+                <div className="mt-4 space-y-3 border-t border-[#dbe7f2] pt-4 dark:border-blue-900/60">
+                  <label className="ml-7 flex cursor-pointer items-start gap-3">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 size-4 rounded border-gray-300 accent-[#1877f2]"
+                      checked={duplicateRec1}
+                      onChange={e => setDuplicateRec1(e.target.checked)}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+                        Advantage+ creative
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <IconInfoCircle className="size-4 text-muted-foreground" strokeWidth={1.8} />
+                          </TooltipTrigger>
+                          <TooltipContent>Review Meta creative suggestions after duplicate.</TooltipContent>
+                        </Tooltip>
+                      </span>
+                      <span className="block text-xs leading-5 text-muted-foreground">Meta may recommend enhancements for each copy.</span>
+                    </span>
+                  </label>
+
+                  {tab !== "ads" && (
+                    <label className="ml-7 flex cursor-pointer items-start gap-3">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 size-4 rounded border-gray-300 accent-[#1877f2]"
+                        checked={duplicateRec2}
+                        onChange={e => setDuplicateRec2(e.target.checked)}
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-foreground">
+                          Add an image
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300">
+                            <IconCircleCheck className="size-3" strokeWidth={2} />
+                            Increase conversions
+                          </span>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <IconInfoCircle className="size-4 text-muted-foreground" strokeWidth={1.8} />
+                            </TooltipTrigger>
+                            <TooltipContent>Use only as a reminder inside the duplicate flow.</TooltipContent>
+                          </Tooltip>
+                        </span>
+                        <span className="block text-xs leading-5 text-muted-foreground">Add more creative variety before publishing copies.</span>
+                      </span>
+                    </label>
+                  )}
+                </div>
+              </section>
+            )}
+
+            {duplicateStep === "gate" && (
+              <section className="space-y-4">
+                <div className="flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-900/60 dark:bg-amber-950/20">
+                  <IconAlertTriangle className="mt-0.5 size-5 shrink-0 text-amber-600" strokeWidth={1.8} />
+                  <div className="min-w-0 space-y-1">
+                    <p className="text-sm font-semibold text-foreground">Nothing has been created on Meta yet</p>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      Continuing creates {duplicateCount} cop{duplicateCount === 1 ? "y" : "ies"} of {selectedIds.size} selected {tab === "adsets" ? "ad set" : "ad"}{selectedIds.size === 1 ? "" : "s"} in the original destination. Save as draft creates them paused in the editor so you can review before they run; Publish duplicate skips that review.
+                    </p>
+                  </div>
+                </div>
+                <p className="rounded-lg bg-muted/50 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                  Recommendations are visual only — they are never sent to Meta.
+                </p>
+              </section>
+            )}
+
+            {duplicateStep === "campaign" && (
+              <>
+                <section className="space-y-3">
+                  <div>
+                    <Label className="text-sm font-semibold text-foreground">Which campaign should hold the copies?</Label>
+                    <p className="mt-1 text-xs text-muted-foreground">Duplicate always decides the campaign first, then the ad set.</p>
+                  </div>
+                  <div className="space-y-2">
+                    {([
+                      ["original", "Keep in the same campaign", "Copies stay in the source ad's campaign."],
+                      ["existing", "Copy to another campaign", "Choose an existing campaign in this ad account."],
+                      ["new", "Create a new campaign", "Create a paused campaign, then place a new ad set inside it."],
+                    ] as const).map(([option, label, description]) => (
+                      <button
+                        key={option}
+                        type="button"
+                        onClick={() => {
+                          setDuplicateAdCampaignDestination(option)
+                          // The ad set choice is constrained by the campaign choice — reset anything now impossible.
+                          if (option === "new") setDuplicateDestination("new")
+                          else if (option === "existing" && duplicateDestination === "original") setDuplicateDestination("existing")
+                          setDuplicateTargetId("")
+                        }}
+                        className={cn(
+                          "flex w-full items-start gap-3 rounded-xl border px-4 py-3 text-left transition",
+                          duplicateAdCampaignDestination === option
+                            ? "border-[#1877f2] bg-[#e7f3ff] shadow-[0_0_0_1px_#1877f2] dark:bg-blue-950/30"
+                            : "border-border bg-background hover:bg-muted/50"
+                        )}
+                      >
+                        <span className={cn(
+                          "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border",
+                          duplicateAdCampaignDestination === option ? "border-[#1877f2]" : "border-muted-foreground/40"
+                        )}>
+                          {duplicateAdCampaignDestination === option && <span className="size-2 rounded-full bg-[#1877f2]" />}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-sm font-semibold text-foreground">{label}</span>
+                          <span className="block text-xs leading-5 text-muted-foreground">{description}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                {duplicateAdCampaignDestination === "existing" && (
+                  <section className="space-y-2">
+                    <Label htmlFor="duplicate-ad-target-campaign" className="text-sm font-semibold">Search campaign</Label>
+                    <div className="relative">
+                      <IconSearch className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" strokeWidth={1.8} />
+                      <select
+                        id="duplicate-ad-target-campaign"
+                        value={duplicateAdCampaignTargetId}
+                        onChange={e => {
+                          setDuplicateAdCampaignTargetId(e.target.value)
+                          setDuplicateTargetId("")
+                        }}
+                        className="h-10 w-full appearance-none rounded-lg border border-input bg-background pl-9 pr-3 text-sm"
+                      >
+                        <option value="">Select campaign</option>
+                        {campaigns.map(campaign => <option key={campaign.id} value={campaign.id}>{campaign.name}</option>)}
+                      </select>
+                    </div>
+                  </section>
+                )}
+
+                {duplicateAdCampaignDestination === "new" && (
+                  <section className="space-y-2 rounded-xl border p-4">
+                    <Label htmlFor="duplicate-ad-new-campaign" className="text-sm font-semibold">New campaign name</Label>
+                    <Input
+                      id="duplicate-ad-new-campaign"
+                      value={duplicateAdCampaignNewName}
+                      onChange={e => setDuplicateAdCampaignNewName(e.target.value)}
+                      placeholder="Enter campaign name"
+                      className="h-10 rounded-lg"
+                    />
+                    <p className="text-xs leading-5 text-muted-foreground">A new campaign can only receive a new ad set, so the next step is fixed to that.</p>
+                  </section>
+                )}
+              </>
+            )}
+
+            {(duplicateStep === "adset" || (tab === "adsets" && duplicateStep === "options")) ? (
                   <section className="space-y-3">
                     <div>
                       <Label className="text-sm font-semibold text-foreground">Where should the copies go?</Label>
-                      <p className="mt-1 text-xs text-muted-foreground">Pick the structure that matches what you want to do next.</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {duplicateStep === "adset" && duplicateAdCampaignDestination === "existing"
+                          ? `Ad sets inside ${selectedDuplicateAdCampaign?.name || "the selected campaign"}.`
+                          : duplicateStep === "adset" && duplicateAdCampaignDestination === "new"
+                            ? "A new campaign starts empty, so the copies need a new ad set."
+                            : "Pick the structure that matches what you want to do next."}
+                      </p>
                     </div>
 
                     <div className="space-y-2">
-                      {(["original", "existing", "new"] as const).map(option => {
+                      {(["original", "existing", "new"] as const).filter(canPickAdSetDestination).map(option => {
                         const label = option === "original"
                           ? tab === "adsets" ? "Keep in the same campaign" : "Keep in the same ad set"
                           : option === "existing"
@@ -4780,14 +5026,14 @@ function AdsManagerContent() {
                       })}
                     </div>
                   </section>
-                ) : (
+                ) : tab === "campaigns" && duplicateStep === "options" ? (
                   <section className="rounded-xl border bg-muted/30 p-4">
                     <div className="text-sm font-semibold text-foreground">New campaign</div>
                     <p className="mt-1 text-xs leading-5 text-muted-foreground">Campaign duplicates always create a new campaign with all ad sets and ads copied.</p>
                   </section>
-                )}
+                ) : null}
 
-                {tab === "adsets" && duplicateDestination === "existing" && (
+                {tab === "adsets" && duplicateStep === "options" && duplicateDestination === "existing" && (
                   <section className="space-y-2">
                     <Label htmlFor="duplicate-target-campaign" className="text-sm font-semibold">Search campaign</Label>
                     <div className="relative">
@@ -4805,7 +5051,7 @@ function AdsManagerContent() {
                   </section>
                 )}
 
-                {tab === "ads" && duplicateDestination === "existing" && (
+                {duplicateStep === "adset" && duplicateDestination === "existing" && (
                   <section className="space-y-2">
                     <Label htmlFor="duplicate-target-adset" className="text-sm font-semibold">Search ad set</Label>
                     <button
@@ -4877,7 +5123,7 @@ function AdsManagerContent() {
                   </section>
                 )}
 
-                {tab !== "campaigns" && duplicateDestination === "new" && (
+                {(duplicateStep === "adset" || (tab === "adsets" && duplicateStep === "options")) && duplicateDestination === "new" && (
                   <section className="space-y-3 rounded-xl border p-4">
                     <div className="space-y-2">
                       <Label htmlFor="duplicate-new-name" className="text-sm font-semibold">New {tab === "adsets" ? "campaign" : "ad set"} name</Label>
@@ -4902,7 +5148,7 @@ function AdsManagerContent() {
                   </section>
                 )}
 
-                {selectedIds.size === 1 && (
+                {duplicateStep === "options" && selectedIds.size === 1 && (
                   <section className="space-y-2">
                     <Label htmlFor="duplicate-name" className="text-sm font-semibold">Name</Label>
                     <Input
@@ -4915,6 +5161,7 @@ function AdsManagerContent() {
                   </section>
                 )}
 
+            {(duplicateStep === "options" || duplicateStep === "gate") && (
             <section className="flex items-center justify-between gap-4 rounded-xl border p-4">
                   <div>
                     <Label htmlFor="duplicate-count" className="text-sm font-semibold">Number of copies</Label>
@@ -4948,7 +5195,9 @@ function AdsManagerContent() {
                     </button>
                   </div>
             </section>
+            )}
 
+            {(duplicateStep === "options" || duplicateStep === "gate") && (
             <section className="space-y-3">
                 <div>
                   <Label className="text-sm font-semibold text-foreground">Meta delivery status</Label>
@@ -4980,31 +5229,41 @@ function AdsManagerContent() {
                   Draft/Publish controls the AdLauncher editing workflow only. It never changes the Meta delivery status selected above.
                 </p>
             </section>
+            )}
           </div>
 
           <DialogFooter className="border-t bg-muted/20 px-6 py-4">
-            {tab === "campaigns" ? (
+            {duplicateStep === "recommend" ? (
               <>
-                <Button variant="outline" onClick={() => setDuplicateDialogOpen(false)} disabled={isDuplicating}>Cancel</Button>
+                <Button variant="outline" onClick={() => setDuplicateDialogOpen(false)} disabled={isDuplicating}>Close</Button>
                 <Button
-                  variant="outline"
+                  onClick={continueDuplicateStep}
                   disabled={isDuplicating}
-                  onClick={() => executeDuplicate("draft")}
-                >
-                  Save as draft
-                </Button>
-                <Button
-                  onClick={() => executeDuplicate("publish")}
-                  disabled={isDuplicating || !canDuplicate}
                   className="bg-[#1877f2] text-white hover:bg-[#166fe5]"
                 >
-                  {isDuplicating && <IconLoader2 className="mr-2 size-4 animate-spin" />}
-                  Publish duplicate
+                  Continue
+                </Button>
+              </>
+            ) : duplicateStep === "campaign" || duplicateStep === "adset" ? (
+              <>
+                <Button variant="outline" onClick={backDuplicateStep} disabled={isDuplicating}>Back</Button>
+                <Button
+                  onClick={continueDuplicateStep}
+                  disabled={isDuplicating || !duplicateStepValid}
+                  className="bg-[#1877f2] text-white hover:bg-[#166fe5]"
+                >
+                  Continue
                 </Button>
               </>
             ) : (
               <>
-                <Button variant="outline" onClick={() => setDuplicateDialogOpen(false)} disabled={isDuplicating}>Cancel</Button>
+                <Button
+                  variant="outline"
+                  onClick={() => (tab === "campaigns" && duplicateStep === "options" ? setDuplicateDialogOpen(false) : backDuplicateStep())}
+                  disabled={isDuplicating}
+                >
+                  {tab === "campaigns" && duplicateStep === "options" ? "Close" : "Back"}
+                </Button>
                 <Button
                   variant="outline"
                   onClick={() => executeDuplicate("draft")}
