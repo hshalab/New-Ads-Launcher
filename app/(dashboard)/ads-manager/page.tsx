@@ -168,6 +168,7 @@ interface AdSet {
   status: string
   effective_status: string
   campaign_id: string
+  campaign_name?: string | null
   daily_budget?: string
   lifetime_budget?: string
   budget_remaining?: string
@@ -1221,6 +1222,10 @@ function AdsManagerContent() {
   const [duplicateName, setDuplicateName] = useState("")
   const [duplicateDestination, setDuplicateDestination] = useState<"original" | "existing" | "new">("original")
   const [duplicateTargetId, setDuplicateTargetId] = useState("")
+  const [duplicateAdSetOptions, setDuplicateAdSetOptions] = useState<AdSet[]>([])
+  const [duplicateAdSetOptionsAccountId, setDuplicateAdSetOptionsAccountId] = useState("")
+  const [duplicateAdSetOptionsLoading, setDuplicateAdSetOptionsLoading] = useState(false)
+  const [duplicateAdSetOptionsError, setDuplicateAdSetOptionsError] = useState("")
   const [duplicateNewName, setDuplicateNewName] = useState("")
   const [duplicateRec1, setDuplicateRec1] = useState(false)
   const [duplicateRec2, setDuplicateRec2] = useState(false)
@@ -1266,6 +1271,10 @@ function AdsManagerContent() {
   const [breakdownError,    setBreakdownError]    = useState("")
 
   useEffect(() => {
+    setDuplicateTargetId("")
+    setDuplicateAdSetOptions([])
+    setDuplicateAdSetOptionsAccountId("")
+    setDuplicateAdSetOptionsError("")
     if (!selectedAccountId) {
       setFiltersHydratedAccount("")
       return
@@ -1355,6 +1364,35 @@ function AdsManagerContent() {
     setDuplicateRec1(false)
     setDuplicateRec2(false)
   }, [tab])
+  useEffect(() => {
+    if (!duplicateDialogOpen || tab !== "ads" || duplicateDestination !== "existing" || !selectedAccountId) return
+    if (duplicateAdSetOptionsAccountId === selectedAccountId) return
+
+    const controller = new AbortController()
+    setDuplicateAdSetOptionsLoading(true)
+    setDuplicateAdSetOptionsError("")
+
+    // ponytail: reuse the cached full ad-set read; add a lightweight picker route if very large accounts make this slow.
+    fetch(`/api/facebook/adsets?ad_account_id=${encodeURIComponent(selectedAccountId)}&date_preset=last_7d`, {
+      signal: controller.signal,
+      cache: "no-store",
+    })
+      .then(async response => {
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error(data.error || "Failed to load ad sets")
+        setDuplicateAdSetOptions(data.adSets || [])
+        setDuplicateAdSetOptionsAccountId(selectedAccountId)
+      })
+      .catch(error => {
+        if (error instanceof DOMException && error.name === "AbortError") return
+        setDuplicateAdSetOptionsError(error instanceof Error ? error.message : "Failed to load ad sets")
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDuplicateAdSetOptionsLoading(false)
+      })
+
+    return () => controller.abort()
+  }, [duplicateAdSetOptionsAccountId, duplicateDestination, duplicateDialogOpen, selectedAccountId, tab])
   const usesCustomRange = (datePreset === "custom" || datePreset === "maximum") && customDateRange
   const drawerSince = usesCustomRange ? formatMetaDate(customDateRange.start) : ""
   const drawerUntil = usesCustomRange ? formatMetaDate(customDateRange.end) : ""
@@ -1947,6 +1985,10 @@ function AdsManagerContent() {
   const canDuplicate = selectedIds.size > 0
     && (tab === "campaigns"
       || !((duplicateDestination === "existing" && !duplicateTargetId) || (duplicateDestination === "new" && !duplicateNewName.trim())))
+  const sourceAdSetIds = new Set(ads.filter(ad => selectedIds.has(ad.id)).map(ad => ad.adset_id))
+  const availableDuplicateAdSetOptions = duplicateAdSetOptions
+    .filter(adSet => (adSet.status === "ACTIVE" || adSet.status === "PAUSED") && !sourceAdSetIds.has(adSet.id))
+    .sort((a, b) => (a.campaign_name || "").localeCompare(b.campaign_name || "") || a.name.localeCompare(b.name))
 
   const openDuplicatePublishConfirm = () => {
     if (!canDuplicate || isDuplicating) return
@@ -4823,10 +4865,17 @@ function AdsManagerContent() {
                         onChange={e => setDuplicateTargetId(e.target.value)}
                         className="h-10 w-full appearance-none rounded-lg border border-input bg-background pl-9 pr-3 text-sm"
                       >
-                        <option value="">Select ad set</option>
-                        {adSets.map(adSet => <option key={adSet.id} value={adSet.id}>{adSet.name}</option>)}
+                        <option value="">{duplicateAdSetOptionsLoading ? "Loading ad sets..." : "Select ad set"}</option>
+                        {availableDuplicateAdSetOptions.map(adSet => (
+                          <option key={adSet.id} value={adSet.id}>
+                            {adSet.campaign_name ? `${adSet.campaign_name} / ` : ""}{adSet.name}
+                          </option>
+                        ))}
                       </select>
                     </div>
+                    {duplicateAdSetOptionsError && (
+                      <p className="text-xs text-destructive">{duplicateAdSetOptionsError}. Close and reopen to retry.</p>
+                    )}
                   </section>
                 )}
 
