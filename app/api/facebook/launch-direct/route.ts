@@ -3,8 +3,9 @@ import { notifyLaunchOutcome } from "@/lib/notifications/launch"
 import { invalidateMetaReadCacheAfterWrite } from "../_db-cache"
 import { getAuthContext, getConnectionForAdAccount, isManual, MissingViaError, requireRole } from "@/lib/auth"
 import { isLaunchable } from "@/lib/creative-readiness"
+import { isExistingAdCreativeId, resolveExistingAdSources, type ExistingAdSource } from "@/lib/existing-ad-launch"
 import { createAdminClient } from "@/lib/supabase/admin"
-import { createAd, getVideoThumbnail, getResourceAccountId, getDynamicCreativeAdSets, getAdSetCampaignsAndNames, copyAdSet, pollVideoReady } from "@/lib/facebook"
+import { createAd, getVideoThumbnail, getResourceAccountId, getDynamicCreativeAdSets, getAdSetCampaignsAndNames, copyAdSet, pollVideoReady, isFreshThumbnailUrl } from "@/lib/facebook"
 import { adAccountBelongsToOrg, normalizeAdAccountId } from "@/app/api/facebook/_utils"
 
 // Simple launch: create ads directly in existing ad sets.
@@ -50,6 +51,7 @@ export async function POST(request: NextRequest) {
       multiPlacementAds,
       adSourceMode,  // "new_ad" | "post_id" | "creative_id"
       adSourceIds,   // Record<creativeId, objectStoryId | metaCreativeId>
+      existingAdSources, // Record<existing_<adId>, ExistingAdSource>
       enhancements,  // DefaultAdSettings["enhancements"] | undefined
       launchSettings, // DefaultAdSettings["launch"] | undefined
       collectionAds, // CollectionAds config | undefined
@@ -94,20 +96,80 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Ad set does not belong to the selected ad account." }, { status: 400 })
     }
 
-    // Fetch creatives from DB
-    const { data: creatives, error: creativeErr } = await supabase
-      .from("creatives")
-      .select("*")
-      .in("id", creativeIds)
-      .eq("org_id", ctx.orgId)
+    // Existing Ads post reuse: synthetic `existing_<adId>` ids carry no DB row —
+    // partition them out before the creatives query, resolve their object_story_id
+    // locally (no Meta call), and splice pseudo-creatives back in below.
+    const realCreativeIds: string[] = (creativeIds as string[]).filter((id: string) => !isExistingAdCreativeId(id))
+    const existingCreativeIds: string[] = (creativeIds as string[]).filter((id: string) => isExistingAdCreativeId(id))
 
-    if (creativeErr || !creatives?.length) {
-      return NextResponse.json({ error: "Creatives not found" }, { status: 400 })
+    let creatives: any[] = []
+    if (realCreativeIds.length > 0) {
+      const { data, error: creativeErr } = await supabase
+        .from("creatives")
+        .select("*")
+        .in("id", realCreativeIds)
+        .eq("org_id", ctx.orgId)
+
+      if (creativeErr || !data?.length) {
+        return NextResponse.json({ error: "Creatives not found" }, { status: 400 })
+      }
+      creatives = data
+
+      const foundIds = new Set(creatives.map((c: any) => c.id))
+      const missingIds = realCreativeIds.filter((id) => !foundIds.has(id))
+      if (missingIds.length > 0) {
+        return NextResponse.json(
+          { error: `Creatives not found: ${missingIds.join(", ")}` },
+          { status: 400 },
+        )
+      }
+    }
+
+    const errors: any[] = []
+
+    if (existingCreativeIds.length > 0) {
+      const { resolved, errors: existingErrors } = resolveExistingAdSources(
+        existingCreativeIds,
+        existingAdSources as Record<string, ExistingAdSource> | undefined,
+        pageId,
+      )
+      if (existingErrors.length > 0) {
+        // Fail the entire request before Meta writes when any Existing Ad source is invalid.
+        return NextResponse.json({
+          error: existingErrors.length === 1
+            ? existingErrors[0].error
+            : `${existingErrors.length} Existing Ad(s) have an invalid post source.`,
+          errors: existingErrors.map(({ creativeId, error }) => ({
+            creativeId,
+            fileName: `Existing Ad ${creativeId.slice("existing_".length)}`,
+            error,
+          })),
+        }, { status: 400 })
+      }
+
+      // Splice pseudo-creatives (no DB row) into `creatives`, preserving request order.
+      for (const id of existingCreativeIds) {
+        const source = resolved.get(id)
+        if (!source) continue
+        creatives.push({
+          id,
+          file_name: `Existing Ad ${source.adId}`,
+          object_story_id: source.postId,
+          is_existing_ad: true,
+        })
+      }
+      const orderIndex = new Map((creativeIds as string[]).map((id: string, i: number) => [id, i]))
+      creatives.sort((a, b) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0))
+    }
+
+    if (creatives.length === 0) {
+      return NextResponse.json({ error: errors[0]?.error || "Creatives not found" }, { status: 400 })
     }
 
     // Launchability = Meta has the asset. Video processing readiness is checked
     // by pollVideoReady below; the seam here is the asset id, not status.
-    const notUploaded = (creatives || []).filter((c: any) => !isLaunchable(c))
+    // Existing-Ad pseudo-creatives reuse a post via object_story_id — exempt.
+    const notUploaded = creatives.filter((c: any) => !c.is_existing_ad && !isLaunchable(c))
     if (notUploaded.length > 0) {
       return NextResponse.json({
         error: `${notUploaded.length} creative(s) not yet uploaded to Meta. Open Ads Manager and upload them before launching.`,
@@ -118,7 +180,6 @@ export async function POST(request: NextRequest) {
     // Scheduled ads must start PAUSED — cron job activates them at scheduled_at
     const adStatus = scheduledStart ? "PAUSED" : (createPaused === false ? "ACTIVE" : "PAUSED")
     const created: any[] = []
-    const errors: any[] = []
 
     // Quick lookup: adSetId → adSetName (for enriching created[] entries)
     const adSetNameMap = new Map<string, string>(
@@ -128,7 +189,7 @@ export async function POST(request: NextRequest) {
     // Skip polling for videos that already have a fb_thumbnail_url (proxy: thumbnail only exists
     // after Meta finishes processing). Only poll the recently-uploaded ones.
     const videosToCheck: { creativeId: string; videoId: string; fileName: string }[] = creatives
-      .filter((c: any) => c.fb_video_id && !c.fb_thumbnail_url)
+      .filter((c: any) => !c.is_existing_ad && c.fb_video_id && !c.fb_thumbnail_url)
       .map((c: any) => ({ creativeId: c.id, videoId: c.fb_video_id, fileName: c.file_name }))
 
     if (videosToCheck.length > 0) {
@@ -194,17 +255,41 @@ export async function POST(request: NextRequest) {
 
       for (const adSetId of adSetIds) {
         for (const grp of multiPlacementAds.groups) {
+          const existingIds = grp.creativeIds.filter(isExistingAdCreativeId)
+          if (existingIds.length > 0) {
+            errors.push(...existingIds.map((creativeId: string) => ({
+              adSetId,
+              multiGroup: grp.name,
+              creativeId,
+              fileName: `Existing Ad ${creativeId.slice("existing_".length)}`,
+              error: "Existing Ads post reuse is not supported in multi-placement ads",
+            })))
+            continue
+          }
+
           const imageHashes: string[] = []
           const videos: any[] = []
           const customRules: any[] = []
 
-          grp.creativeIds.forEach((cid: string) => {
+          for (const cid of grp.creativeIds) {
             const cr: any = creativeMap.get(cid)
-            if (!cr) return
+            if (!cr) continue
             let assetIdx: number, assetType: "image" | "video"
-            if (cr.fb_image_hash) { imageHashes.push(cr.fb_image_hash); assetIdx = imageHashes.length - 1; assetType = "image" }
-            else if (cr.fb_video_id) { videos.push({ video_id: cr.fb_video_id, thumbnail_url: cr.fb_thumbnail_url || undefined }); assetIdx = videos.length - 1; assetType = "video" }
-            else return
+            if (cr.fb_image_hash) {
+              imageHashes.push(cr.fb_image_hash)
+              assetIdx = imageHashes.length - 1
+              assetType = "image"
+            } else if (cr.fb_video_id) {
+              if (!isFreshThumbnailUrl(cr.fb_thumbnail_url)) {
+                cr.fb_thumbnail_url = (await getVideoThumbnail(cr.fb_video_id, token, { skipProof: tokenOpts.isManual })) || undefined
+                if (cr.fb_thumbnail_url) {
+                  await supabase.from("creatives").update({ fb_thumbnail_url: cr.fb_thumbnail_url }).eq("id", cr.id)
+                }
+              }
+              videos.push({ video_id: cr.fb_video_id, thumbnail_url: cr.fb_thumbnail_url || undefined })
+              assetIdx = videos.length - 1
+              assetType = "video"
+            } else continue
 
             // Manual placements override
             const userPlacements: string[] = grp.placements?.[cid] || []
@@ -221,7 +306,7 @@ export async function POST(request: NextRequest) {
                 })
               }
             }
-          })
+          }
 
           if (imageHashes.length + videos.length < 2) {
             errors.push({ adSetId, multiGroup: grp.name, error: "Multi-placement group needs ≥2 media" })
@@ -259,6 +344,20 @@ export async function POST(request: NextRequest) {
       const creativeMap = new Map(creatives.map((c: any) => [c.id, c]))
       for (const adSetId of adSetIds) {
         for (const fa of flexibleAds) {
+          const existingIds = fa.groups.flatMap((group: any) =>
+            group.creativeIds.filter(isExistingAdCreativeId)
+          )
+          if (existingIds.length > 0) {
+            errors.push(...existingIds.map((creativeId: string) => ({
+              adSetId,
+              flexibleAd: fa.name,
+              creativeId,
+              fileName: `Existing Ad ${creativeId.slice("existing_".length)}`,
+              error: "Existing Ads post reuse is not supported in flexible ads",
+            })))
+            continue
+          }
+
           const allImageHashes: string[] = []
           const allVideos: { video_id: string; thumbnail_url?: string }[] = []
           const groupAssetIndex: Array<{ image_indices?: number[]; video_indices?: number[] }> = []
@@ -273,6 +372,12 @@ export async function POST(request: NextRequest) {
                 allImageHashes.push(cr.fb_image_hash)
                 imgIdx.push(allImageHashes.length - 1)
               } else if (cr.fb_video_id) {
+                if (!isFreshThumbnailUrl(cr.fb_thumbnail_url)) {
+                  cr.fb_thumbnail_url = (await getVideoThumbnail(cr.fb_video_id, token, { skipProof: tokenOpts.isManual })) || undefined
+                  if (cr.fb_thumbnail_url) {
+                    await supabase.from("creatives").update({ fb_thumbnail_url: cr.fb_thumbnail_url }).eq("id", cr.id)
+                  }
+                }
                 allVideos.push({ video_id: cr.fb_video_id, thumbnail_url: cr.fb_thumbnail_url || undefined })
                 vidIdx.push(allVideos.length - 1)
               }
@@ -316,6 +421,20 @@ export async function POST(request: NextRequest) {
       const creativeMap = new Map(creatives.map((c: any) => [c.id, c]))
       for (const adSetId of adSetIds) {
         for (const carousel of carouselAds) {
+          const existingIds = carousel.cards
+            .map((card: any) => card.creativeId)
+            .filter(isExistingAdCreativeId)
+          if (existingIds.length > 0) {
+            errors.push(...existingIds.map((creativeId: string) => ({
+              adSetId,
+              carousel: carousel.name,
+              creativeId,
+              fileName: `Existing Ad ${creativeId.slice("existing_".length)}`,
+              error: "Existing Ads post reuse is not supported in carousel ads",
+            })))
+            continue
+          }
+
           const childCards: any[] = []
           for (const card of carousel.cards) {
             const cr: any = creativeMap.get(card.creativeId)
@@ -389,7 +508,7 @@ export async function POST(request: NextRequest) {
       }
       for (let creativeIndex = 0; creativeIndex < creatives.length; creativeIndex++) {
         const creative = creatives[creativeIndex]
-        if (!creative.fb_image_hash && !creative.fb_video_id) {
+        if (!creative.is_existing_ad && !creative.fb_image_hash && !creative.fb_video_id) {
           errors.push({
             adSetId,
             creativeId: creative.id,
@@ -424,6 +543,34 @@ export async function POST(request: NextRequest) {
 
         const adName = (rowAdName?.trim()) || creative.file_name.replace(/\.[^/.]+$/, "")
         const sourceId = adSourceIds?.[creative.id] || ""
+
+        // Existing Ads always reuse their validated source post, independently of
+        // the global manual-paste source mode. They have no creatives DB row.
+        if (creative.is_existing_ad) {
+          try {
+            const ad = await createAd(adAccountId, token, {
+              name: adName,
+              adset_id: targetAdSetId,
+              page_id: pageId,
+              object_story_id: creative.object_story_id,
+              title: "", body: "", cta: cta || "LEARN_MORE", link_url: webLink || "",
+              status: adStatus,
+            }, tokenOpts)
+            created.push({
+              adId: ad.id,
+              adSetId: targetAdSetId,
+              adSetName: adSetNameMap.get(targetAdSetId) || targetAdSetId,
+              creativeId: creative.id,
+              fileName: creative.file_name,
+              thumbnailUrl: null,
+              mediaType: "existing_ad",
+              mode: "existing_ad_post",
+            })
+          } catch (err: any) {
+            errors.push({ adSetId: targetAdSetId, creativeId: creative.id, fileName: creative.file_name, error: err.message || "Failed to reuse existing ad post" })
+          }
+          continue
+        }
 
         // ── Post ID mode ──────────────────────────────────────────────────────
         if (adSourceMode === "post_id" && sourceId) {
@@ -464,12 +611,10 @@ export async function POST(request: NextRequest) {
         }
 
         // ── New ad mode (default) ─────────────────────────────────────────────
-        // Meta REQUIRES image_url or image_hash in video_data (subcode 1443226).
-        // Always fetch from Meta CDN — Supabase URL won't work because Meta filters non-fbcdn URLs.
+        // Meta requires a current image_url in video_data (subcode 1443226).
         let thumbnailUrl: string | undefined
-        const isMetaCdn = (u?: string | null) => !!u && /(fbcdn\.net|facebook\.com)/.test(u)
         if (creative.fb_video_id) {
-          if (isMetaCdn(creative.fb_thumbnail_url)) {
+          if (isFreshThumbnailUrl(creative.fb_thumbnail_url)) {
             thumbnailUrl = creative.fb_thumbnail_url
           } else {
             thumbnailUrl = (await getVideoThumbnail(creative.fb_video_id, token, { skipProof: tokenOpts.isManual })) || undefined

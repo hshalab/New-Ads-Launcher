@@ -229,6 +229,7 @@ interface ExistingAdRow {
   page_id?: string
   post_id?: string
   post_url?: string
+  link?: string
   thumb_url?: string
   image_hash?: string
   video_id?: string
@@ -271,7 +272,7 @@ export function LoadMediaModal({
 }: {
   open: boolean; onClose: () => void; adAccountId: string
   adAccounts?: AdAccountItem[]
-  alreadySelected: Set<string>; onConfirm: (ids: string[], creatives: Creative[]) => void
+  alreadySelected: Set<string>; onConfirm: (ids: string[], creatives: Creative[], existingAdSources?: Record<string, { adId: string; postId: string }>) => void
   // Increment from parent to force re-fetch (e.g. after a new upload completes)
   refreshSignal?: number
   // Restrict which tabs render; defaults to all tabs
@@ -567,8 +568,21 @@ export function LoadMediaModal({
   }
 
   const handleSelectExistingAds = () => {
-    // Convert selected existing ads → creatives and pass back
-    const picked = existingAds.filter(a => existingSelected.has(a.id))
+    const selected = existingAds.filter(a => existingSelected.has(a.id))
+    const picked = selected.filter(a => a.post_id)
+
+    if (picked.length !== selected.length) {
+      setExistingError(`${selected.length - picked.length} selected ad${selected.length - picked.length === 1 ? " has" : "s have"} no post to reuse`)
+    } else {
+      setExistingError("")
+    }
+
+    if (!picked.length) return
+
+    const existingAdSources = Object.fromEntries(picked.map(a => [
+      `existing_${a.id}`,
+      { adId: a.id, postId: a.post_id! },
+    ]))
     const creatives: Creative[] = picked.map(a => ({
       id: `existing_${a.id}`,
       file_name: a.name,
@@ -577,14 +591,14 @@ export function LoadMediaModal({
       headline: "",
       primary_text: "",
       cta: "LEARN_MORE",
-      link_url: a.post_url || "",
+      link_url: a.link || "",
       fb_image_url: a.thumb_url,
       fb_thumbnail_url: a.thumb_url,
       fb_image_hash: a.image_hash,
       fb_video_id: a.video_id,
       created_at: a.date_created,
     }))
-    onConfirm(picked.map(a => `existing_${a.id}`), creatives)
+    onConfirm(picked.map(a => `existing_${a.id}`), creatives, existingAdSources)
     onClose()
   }
 

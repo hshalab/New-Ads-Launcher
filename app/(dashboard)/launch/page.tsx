@@ -69,6 +69,7 @@ import { LoadCopyModal } from "@/components/shared/load-copy-modal"
 import { formatNumberShort, formatCurrency } from "@/lib/format"
 import { useLaunchBatchesRealtime } from "@/hooks/use-launch-batches-realtime"
 import { isLaunchable } from "@/lib/creative-readiness"
+import { isExistingAdCreativeId, type ExistingAdSource } from "@/lib/existing-ad-launch"
 
 const Tip = ({ text, children, className }: { text: string; children: ReactNode; className?: string }) => (
   <Tooltip>
@@ -8645,7 +8646,14 @@ function AdSetupPanel({
 
         {/* Ad Source — shown when media is loaded */}
         {selectedCreatives.length > 0 && (() => {
-          const resolvedCount = selectedCreatives.filter(c =>
+          // Existing Ads always reuse their validated source post server-side
+          // (see launch-direct route.ts), independently of adSourceMode. Keep
+          // them out of the manual Post ID/Creative ID/New ad toggle entirely —
+          // showing them there is what previously read as "stuck on New ad".
+          const existingCreatives = selectedCreatives.filter(c => isExistingAdCreativeId(c.id))
+          const otherCreatives = selectedCreatives.filter(c => !isExistingAdCreativeId(c.id))
+
+          const resolvedCount = existingCreatives.length + otherCreatives.filter(c =>
             adSourceMode === "post_id"
               ? !!adSourceIds[c.id]
               : adSourceMode === "creative_id"
@@ -8672,6 +8680,11 @@ function AdSetupPanel({
                       ? <span className="text-xs text-green-600 font-medium">{resolvedCount}/{selectedCreatives.length} resolved</span>
                       : <span className="text-xs text-amber-500 font-medium">0/{selectedCreatives.length} resolved</span>
                   }
+                  {existingCreatives.length > 0 && (
+                    <span className="text-xs text-blue-600 font-medium">
+                      {existingCreatives.length} reusing source post
+                    </span>
+                  )}
                 </div>
                 <button
                   onClick={() => setAdSourceMode("new_ad")}
@@ -8745,10 +8758,10 @@ function AdSetupPanel({
                 </div>
               )}
 
-              {/* Thumbnails row for new_ad mode */}
+              {/* Thumbnails row for new_ad mode — Existing Ads never upload here, they reuse a post */}
               {adSourceMode === "new_ad" && (
                 <div className="px-3 pb-3 flex gap-2 flex-wrap">
-                  {selectedCreatives.map(c => {
+                  {otherCreatives.map(c => {
                     const ready = c.status === "ready"
                     return (
                       <div key={c.id} className="relative" title={c.file_name}>
@@ -9019,7 +9032,8 @@ function GalleryMediaPanel({ selectedCreatives, onOpenModal, onDeselect, onRemov
       >
         {selectedCreatives.map(c => {
           const thumb = proxyFbImage(c.media_type === "video" ? c.fb_thumbnail_url : (c.fb_image_url || c.file_url))
-          const isReady = c.media_type === "video"
+          // Existing Ads reuse a validated post via object_story_id — no Meta upload to check.
+          const isReady = isExistingAdCreativeId(c.id) ? true : c.media_type === "video"
             ? !!c.fb_video_id && c.status !== "processing" && c.status !== "pending" && c.status !== "error"
             : !!c.fb_image_hash
           const isVideo = c.media_type === "video"
@@ -9735,6 +9749,7 @@ interface DraftSnapshot {
   launchAsActive?: boolean
   adSourceMode?: AdSourceMode
   adSourceIds?: Record<string, string>
+  existingAdSources?: Record<string, ExistingAdSource>
   selectedCreativeIds?: string[]
   adNameOverrides?: Record<string, string>
   tableViewMode?: "single" | "stacked" | "grid" | "side-by-side"
@@ -11810,6 +11825,7 @@ function LaunchPageContent() {
   }
   const [adSourceMode, setAdSourceMode] = useState<AdSourceMode>("new_ad")
   const [adSourceIds, setAdSourceIds] = useState<Record<string, string>>({})
+  const [existingAdSources, setExistingAdSources] = useState<Record<string, ExistingAdSource>>({})
   const [utmParams, setUtmParams] = useState("")
   const [displayLink, setDisplayLink] = useState("")
   const [selectedMediaIds, setSelectedMediaIds] = useState<Set<string>>(new Set())
@@ -11853,6 +11869,7 @@ function LaunchPageContent() {
         setSelectedMediaIds(new Set())
         setSelectedCreatives([])
         setAdNameOverrides({})
+        setExistingAdSources({})
         return
       }
       fetch(`/api/creatives?ad_account_id=${encodeURIComponent(selectedAccountId)}`)
@@ -11864,6 +11881,7 @@ function LaunchPageContent() {
           setSelectedCreatives(restored)
           setSelectedMediaIds(new Set(restored.map(c => c.id)))
           setAdNameOverrides(saved.names || {})
+          setExistingAdSources({})
         })
         .catch(() => {})
     } catch {}
@@ -11927,6 +11945,7 @@ function LaunchPageContent() {
         if (picked.length) {
           setSelectedCreatives(picked)
           setSelectedMediaIds(new Set(picked.map(c => c.id)))
+          setExistingAdSources({})
         }
         return picked.length
       } catch {
@@ -12226,7 +12245,7 @@ function LaunchPageContent() {
   const [launchError, setLaunchError] = useState<string | null>(null)
   const [leftPanelWidth, setLeftPanelWidth] = useState<number>(550)
   const [isResizing, setIsResizing] = useState(false)
-  const videoMissingThumbCount = selectedCreatives.filter(c => c.media_type === "video" && !c.fb_thumbnail_url).length
+  const videoMissingThumbCount = selectedCreatives.filter(c => c.media_type === "video" && !c.fb_thumbnail_url && !isExistingAdCreativeId(c.id)).length
   const [historyReload, setHistoryReload] = useState(0)
   const [error, setError] = useState("")
   const [validationErrors, setValidationErrors] = useState<Record<string, boolean>>({})
@@ -13060,13 +13079,17 @@ function LaunchPageContent() {
     }
     if (selectedAdSets.length === 0) return fail("No ad set selected — please select at least 1 ad set", ["adsets"])
     if (selectedMediaIds.size === 0) return fail("No creative selected — please select at least 1 image/video", ["creatives"])
-    const erroredCreatives = selectedCreatives.filter(c => c.status === "error")
+    const erroredCreatives = selectedCreatives.filter(c => !isExistingAdCreativeId(c.id) && c.status === "error")
     if (erroredCreatives.length > 0) {
       return fail(`${erroredCreatives.length} media failed to upload. Please remove them or re-upload.`, ["creatives"])
     }
-    const pendingCreatives = selectedCreatives.filter(c => !isLaunchable(c))
+    const pendingCreatives = selectedCreatives.filter(c => !isExistingAdCreativeId(c.id) && !isLaunchable(c))
     if (pendingCreatives.length > 0) {
       return fail(`${pendingCreatives.length} media still uploading/processing on Meta — please wait until they show "ready" then try again`, ["creatives"])
+    }
+    const unresolvedExisting = selectedCreatives.filter(c => isExistingAdCreativeId(c.id) && !existingAdSources[c.id])
+    if (unresolvedExisting.length > 0) {
+      return fail(`${unresolvedExisting.length} existing ad${unresolvedExisting.length === 1 ? " has" : "s have"} no post to reuse — remove and reselect`, ["creatives"])
     }
     if (!webLink.trim()) return fail("Destination URL is required when the CTA uses a link.", ["webLink"])
     if (!/^https?:\/\//.test(webLink.trim())) return fail("URL must start with http:// or https://.", ["webLink"])
@@ -13126,6 +13149,7 @@ function LaunchPageContent() {
     launchAsActive,
     adSourceMode,
     adSourceIds,
+    existingAdSources,
     // Creatives are stored by id and re-fetched on load: a creative may have been deleted,
     // or re-uploaded to Meta with a new fb_video_id, between saving and reopening.
     selectedCreativeIds: selectedCreatives.map(c => c.id),
@@ -13232,6 +13256,7 @@ function LaunchPageContent() {
       setLaunchAsActive(!!snap.launchAsActive)
       setAdSourceMode(snap.adSourceMode || "new_ad")
       setAdSourceIds(snap.adSourceIds || {})
+      setExistingAdSources(snap.existingAdSources || {})
       setAdNameOverrides(snap.adNameOverrides || {})
       if (snap.tableViewMode) setTableViewMode(snap.tableViewMode)
       if (snap.adFormat) setAdFormat(snap.adFormat)
@@ -13379,6 +13404,7 @@ function LaunchPageContent() {
             : undefined,
           adSourceMode,
           adSourceIds: Object.keys(adSourceIds).length > 0 ? adSourceIds : undefined,
+          existingAdSources: Object.keys(existingAdSources).length > 0 ? existingAdSources : undefined,
           enhancements: savedEnhancements,
           launchSettings: { ...savedLaunchSettings, oneAdPerAdset },
           collectionAds: collectionAds.enabled && collectionAds.catalogId && collectionAds.productSetId
@@ -13434,6 +13460,7 @@ function LaunchPageContent() {
       if (result.failed === 0 && !result.scheduleError && !result.auditError) {
         setSelectedMediaIds(new Set())
         setSelectedCreatives([])
+        setExistingAdSources({})
       }
     } catch {
       setLaunchPhase("error")
@@ -13859,9 +13886,10 @@ function LaunchPageContent() {
       <LoadMediaModal open={mediaModalOpen} onClose={() => setMediaModalOpen(false)}
         adAccountId={selectedAccountId} adAccounts={adAccounts} alreadySelected={selectedMediaIds}
         refreshSignal={mediaRefreshSignal}
-        onConfirm={(ids, creatives) => {
+        onConfirm={(ids, creatives, sources) => {
           setSelectedMediaIds(new Set(ids))
           setSelectedCreatives(creatives)
+          setExistingAdSources(sources || {})
           // Auto-fill empty form fields from first creative's saved metadata
           // (so preview & launch have proper text/CTA/URL when picking from Media Library)
           const first = creatives.find(c => c.headline || c.primary_text || c.link_url)
@@ -13887,6 +13915,7 @@ function LaunchPageContent() {
       {/* Creative picker for TableMode rows — multi-select supported */}
       <LoadMediaModal open={creativePickerRowId !== null} onClose={() => setCreativePickerRowId(null)}
         adAccountId={selectedAccountId} adAccounts={adAccounts} alreadySelected={new Set()}
+        tabs={["vault", "library", "gdrive", "drive_browser", "drive_link", "integrations"]}
         onConfirm={(ids, creatives) => {
           if (creatives.length > 0 && creativePickerRowId) {
             setTableRows(prev => {
@@ -14264,7 +14293,7 @@ function LaunchPageContent() {
                 <span className="text-sm font-semibold">Ads {selectedCreatives.length > 0 && <span className="text-muted-foreground font-normal">({selectedCreatives.length})</span>}</span>
                 {selectedCreatives.length > 0 && (
                   <button
-                    onClick={() => { setSelectedMediaIds(new Set()); setSelectedCreatives([]); setAdNameOverrides({}) }}
+                    onClick={() => { setSelectedMediaIds(new Set()); setSelectedCreatives([]); setAdNameOverrides({}); setExistingAdSources({}) }}
                     className="flex items-center justify-center size-5 rounded-md bg-red-500 hover:bg-red-600 transition-colors"
                     title="Clear all ads"
                   >
@@ -14381,8 +14410,9 @@ function LaunchPageContent() {
                   setSelectedMediaIds(prev => { const s = new Set(prev); s.delete(id); return s })
                   setSelectedCreatives(prev => prev.filter(c => c.id !== id))
                   setAdNameOverrides(prev => { const n = { ...prev }; delete n[id]; return n })
+                  if (isExistingAdCreativeId(id)) setExistingAdSources(prev => { const n = { ...prev }; delete n[id]; return n })
                 }}
-                onRemoveAll={() => { setSelectedMediaIds(new Set()); setSelectedCreatives([]); setAdNameOverrides({}) }}
+                onRemoveAll={() => { setSelectedMediaIds(new Set()); setSelectedCreatives([]); setAdNameOverrides({}); setExistingAdSources({}) }}
                 onUploadFiles={handleUploadFiles}
                 uploading={uploading}
                 uploadProgress={uploadProgress}

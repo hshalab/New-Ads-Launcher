@@ -1273,6 +1273,28 @@ export async function copyAdSet(
   return { id: newId }
 }
 
+// Meta CDN thumbnails carry an oe= expiry as a hex Unix timestamp.
+// Only a current Meta URL is launch-safe; other URLs must be refreshed from the video.
+export function isFreshThumbnailUrl(url?: string | null, bufferMs = 5 * 60_000): boolean {
+  if (!url) return false
+
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return false
+  }
+
+  const host = parsed.hostname.toLowerCase()
+  const isMetaCdn = host === "fbcdn.net" || host.endsWith(".fbcdn.net") || host === "facebook.com" || host.endsWith(".facebook.com")
+  if (!isMetaCdn) return false
+
+  const expiry = parsed.searchParams.get("oe")
+  if (!expiry || !/^[0-9a-f]+$/i.test(expiry)) return false
+
+  return Number.parseInt(expiry, 16) * 1000 - bufferMs > Date.now()
+}
+
 // Fetch a video's HD thumbnail URL from Facebook.
 // Single call fetching both thumbnails and picture — prefers highest-res thumbnail.
 export async function getVideoThumbnail(videoId: string, accessToken: string, opts?: MetaFetchOpts): Promise<string | null> {
@@ -1640,17 +1662,20 @@ export async function createAd(
     }
   }
   if (params.video_id) {
+    // image_url is REQUIRED by Meta for video ads (subcode 1443226).
+    // Block locally instead of wasting a Meta call on an absent or stale thumbnail.
+    if (!isFreshThumbnailUrl(params.thumbnail_url)) {
+      throw new Error(`Video ad blocked before Meta call: no fresh thumbnail resolved for video_id ${params.video_id}.`)
+    }
     const videoData: any = {
       video_id: params.video_id,
       title: params.title,
       message: params.body,
       call_to_action: { type: params.cta, value: { link: params.link_url } },
+      image_url: params.thumbnail_url,
     }
     // link_description is the correct field for description in video_data (not "description")
     if (params.description) videoData.link_description = params.description
-    // image_url is REQUIRED by Meta for video ads (subcode 1443226 if missing).
-    // Caller (launch-direct) prefers Meta CDN URLs but Supabase public URLs work too.
-    if (params.thumbnail_url) videoData.image_url = params.thumbnail_url
     creativeSpec.video_data = videoData
     delete creativeSpec.link_data
   }
@@ -1717,6 +1742,10 @@ export async function createAd(
   // it explicitly maps assets to placements
   if (params.multi_placement) {
     const mp = params.multi_placement
+    const staleVideo = mp.videos.find(v => !isFreshThumbnailUrl(v.thumbnail_url))
+    if (staleVideo) {
+      throw new Error(`Multi-placement ad blocked before Meta call: no fresh thumbnail resolved for video_id ${staleVideo.video_id}.`)
+    }
     const images = mp.imageHashes.map((h, i) => ({ hash: h, adlabels: [{ name: `img_${i}` }] }))
     const videos = mp.videos.map((v, i) => ({ video_id: v.video_id, thumbnail_url: v.thumbnail_url, adlabels: [{ name: `vid_${i}` }] }))
 
@@ -1740,6 +1769,10 @@ export async function createAd(
   // Each group of media becomes a "variant pool"; Meta picks combinations dynamically
   if (params.flexible_asset_feed) {
     const fa = params.flexible_asset_feed
+    const staleVideo = fa.videos.find(v => !isFreshThumbnailUrl(v.thumbnail_url))
+    if (staleVideo) {
+      throw new Error(`Flexible ad blocked before Meta call: no fresh thumbnail resolved for video_id ${staleVideo.video_id}.`)
+    }
     const images = fa.image_hashes.map(h => ({ hash: h }))
     const videos = fa.videos.map(v => ({ video_id: v.video_id, thumbnail_url: v.thumbnail_url }))
 
