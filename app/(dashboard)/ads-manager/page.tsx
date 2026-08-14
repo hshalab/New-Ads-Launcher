@@ -15,7 +15,6 @@ import {
   IconChevronRight as IconDrillRight,
   IconSpeakerphone, IconTarget, IconPhoto, IconExternalLink, IconClipboard, IconX,
   IconAdjustments, IconDownload, IconChartBar, IconInfoCircle, IconSearch,
-  IconSparkles, IconCircleCheck,
 } from "@tabler/icons-react"
 import dynamic from "next/dynamic"
 import { type Level, type ReportRow } from "@/components/ads-manager/InsightDrawers"
@@ -1216,7 +1215,6 @@ function AdsManagerContent() {
   const [inlineEditingId, setInlineEditingId] = useState<string | null>(null)
   const [inlineEditingName, setInlineEditingName] = useState("")
   const [duplicateDialogOpen, setDuplicateDialogOpen] = useState(false)
-  const [duplicateStep, setDuplicateStep] = useState<1 | 2>(1)
   const [duplicateCount, setDuplicateCount] = useState(1)
   const [isDuplicating, setIsDuplicating] = useState(false)
   const [duplicateName, setDuplicateName] = useState("")
@@ -1229,9 +1227,6 @@ function AdsManagerContent() {
   const [duplicateAdSetPickerOpen, setDuplicateAdSetPickerOpen] = useState(false)
   const [duplicateAdSetSearch, setDuplicateAdSetSearch] = useState("")
   const [duplicateNewName, setDuplicateNewName] = useState("")
-  const [duplicateRec1, setDuplicateRec1] = useState(false)
-  const [duplicateRec2, setDuplicateRec2] = useState(false)
-  const [duplicateStatusActive, setDuplicateStatusActive] = useState(false)
   const [duplicateConfirmOpen, setDuplicateConfirmOpen] = useState(false)
   const [savingTemplateId, setSavingTemplateId] = useState<string | null>(null)
   const [actionToast, setActionToast] = useState<{ kind: "success" | "error"; message: string; href?: string } | null>(null)
@@ -1359,14 +1354,10 @@ function AdsManagerContent() {
   const router = useRouter()
   const level: Level = tab === "campaigns" ? "campaign" : tab === "adsets" ? "adset" : "ad"
   useEffect(() => {
-    setDuplicateStep(1)
     setDuplicateDestination("original")
     setDuplicateTargetId("")
     setDuplicateName("")
     setDuplicateNewName("")
-    setDuplicateStatusActive(false)
-    setDuplicateRec1(false)
-    setDuplicateRec2(false)
     setDuplicateAdSetPickerOpen(false)
     setDuplicateAdSetSearch("")
   }, [tab])
@@ -4706,8 +4697,7 @@ function AdsManagerContent() {
         open={duplicateDialogOpen}
         onOpenChange={open => {
           setDuplicateDialogOpen(open)
-          if (open) setDuplicateStep(tab === "campaigns" ? 2 : 1)
-          else {
+          if (!open) {
             setDuplicateAdSetPickerOpen(false)
             setDuplicateAdSetSearch("")
           }
@@ -4717,108 +4707,45 @@ function AdsManagerContent() {
           <DialogHeader className="border-b px-6 py-5 text-left">
             <div className="flex items-start gap-3">
               <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[#e7f3ff] text-[#1877f2]">
-                <IconSparkles className="size-5" strokeWidth={1.8} />
+                <IconCopy className="size-5" strokeWidth={1.8} />
               </div>
               <div className="min-w-0 space-y-1">
                 <DialogTitle className="text-xl font-semibold tracking-tight text-foreground">
                   Duplicate {tab === "campaigns" ? "Campaign" : tab === "adsets" ? "Ad Set" : "Ad"}
                 </DialogTitle>
                 <DialogDescription className="text-sm text-muted-foreground">
-                  {selectedIds.size} selected. {tab === "campaigns" ? "Select copies options." : duplicateStep === 1 ? "Choose recommendations to apply." : "Select destination and copies options."}
+                  {selectedIds.size} selected. {tab === "campaigns" ? "Choose name and quantity." : "Choose where copies go, then set name and quantity."}
                 </DialogDescription>
               </div>
             </div>
           </DialogHeader>
 
           <div className="max-h-[72vh] space-y-5 overflow-y-auto px-6 py-5">
-            {tab !== "campaigns" && duplicateStep === 1 ? (
-              <section className="rounded-xl border border-[#dbe7f2] bg-[#f7fbff] p-4 dark:border-blue-900/60 dark:bg-blue-950/20">
-                <label className="flex cursor-pointer items-start gap-3">
-                  <input
-                    type="checkbox"
-                    className="mt-1 size-4 rounded border-gray-300 accent-[#1877f2]"
-                    checked={tab === "ads" ? duplicateRec1 : (duplicateRec1 && duplicateRec2)}
-                    onChange={e => {
-                      setDuplicateRec1(e.target.checked)
-                      if (tab !== "ads") {
-                        setDuplicateRec2(e.target.checked)
-                      }
-                    }}
-                  />
-                  <span className="space-y-1">
-                    <span className="block text-sm font-semibold text-foreground">Apply recommendations</span>
-                    <span className="block text-xs leading-5 text-muted-foreground">Suggested improvements are visual only and are not sent to Meta.</span>
-                  </span>
-                </label>
-
-                <div className="mt-4 space-y-3 border-t border-[#dbe7f2] pt-4 dark:border-blue-900/60">
-                  <label className="ml-7 flex cursor-pointer items-start gap-3">
-                    <input
-                      type="checkbox"
-                      className="mt-0.5 size-4 rounded border-gray-300 accent-[#1877f2]"
-                      checked={duplicateRec1}
-                      onChange={e => setDuplicateRec1(e.target.checked)}
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-                        Advantage+ creative
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <IconInfoCircle className="size-4 text-muted-foreground" strokeWidth={1.8} />
-                          </TooltipTrigger>
-                          <TooltipContent>Review Meta creative suggestions after duplicate.</TooltipContent>
-                        </Tooltip>
-                      </span>
-                      <span className="block text-xs leading-5 text-muted-foreground">Meta may recommend enhancements for each copy.</span>
-                    </span>
-                  </label>
-
-                  {tab !== "ads" && (
-                    <label className="ml-7 flex cursor-pointer items-start gap-3">
-                      <input
-                        type="checkbox"
-                        className="mt-0.5 size-4 rounded border-gray-300 accent-[#1877f2]"
-                        checked={duplicateRec2}
-                        onChange={e => setDuplicateRec2(e.target.checked)}
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-foreground">
-                          Add an image
-                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300">
-                            <IconCircleCheck className="size-3" strokeWidth={2} />
-                            Increase conversions
-                          </span>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <IconInfoCircle className="size-4 text-muted-foreground" strokeWidth={1.8} />
-                            </TooltipTrigger>
-                            <TooltipContent>Use only as a reminder inside the duplicate flow.</TooltipContent>
-                          </Tooltip>
-                        </span>
-                        <span className="block text-xs leading-5 text-muted-foreground">Add more creative variety before publishing copies.</span>
-                      </span>
-                    </label>
-                  )}
-                </div>
-              </section>
-            ) : (
-              <>
-                {tab !== "campaigns" ? (
+            {tab !== "campaigns" ? (
                   <section className="space-y-3">
                     <div>
-                      <Label className="text-sm font-semibold text-foreground">Destination</Label>
-                      <p className="mt-1 text-xs text-muted-foreground">Choose where the duplicated {tab === "adsets" ? "ad set" : "ad"} will be created.</p>
+                      <Label className="text-sm font-semibold text-foreground">Where should the copies go?</Label>
+                      <p className="mt-1 text-xs text-muted-foreground">Pick the structure that matches what you want to do next.</p>
                     </div>
 
                     <div className="space-y-2">
                       {(["original", "existing", "new"] as const).map(option => {
-                        const destinationText = tab === "adsets" ? "campaign" : "ad set"
-                        const label = option === "original" ? `Original ${destinationText}` : option === "existing" ? `Existing ${destinationText}` : `New ${destinationText}`
-                        const description = option === "original"
-                          ? `Create copies in the same ${destinationText}.`
+                        const label = option === "original"
+                          ? tab === "adsets" ? "Keep in the same campaign" : "Keep in the same ad set"
                           : option === "existing"
-                            ? `Choose another ${destinationText} from this ad account.`
-                            : `Create a new ${destinationText} first, then place copies inside it.`
+                            ? tab === "adsets" ? "Copy to another campaign" : "Copy to another ad set"
+                            : tab === "adsets" ? "Create a new campaign" : "Create a new ad set"
+                        const description = option === "original"
+                          ? tab === "adsets"
+                            ? "Keep each copied ad set beside its source."
+                            : "Keep each copied ad beside its source."
+                          : option === "existing"
+                            ? tab === "adsets"
+                              ? "Choose an existing campaign in this ad account."
+                              : "Use this when the copies should run under a different ad set or campaign."
+                            : tab === "adsets"
+                              ? "Create a paused campaign, then place the copied ad sets inside it."
+                              : "Copy the source ad set settings into a new paused ad set, then place the ads inside it."
 
                         return (
                           <button
@@ -4982,7 +4909,7 @@ function AdsManagerContent() {
                   </section>
                 )}
 
-                <section className="flex items-center justify-between gap-4 rounded-xl border p-4">
+            <section className="flex items-center justify-between gap-4 rounded-xl border p-4">
                   <div>
                     <Label htmlFor="duplicate-count" className="text-sm font-semibold">Number of copies</Label>
                     <p className="mt-1 text-xs text-muted-foreground">Up to 20 copies per selected item.</p>
@@ -5014,30 +4941,7 @@ function AdsManagerContent() {
                       +
                     </button>
                   </div>
-                </section>
-
-                <label className="flex cursor-pointer items-start gap-3 rounded-xl border p-4">
-                  <input
-                    type="checkbox"
-                    className="mt-1 size-4 rounded border-gray-300 accent-[#1877f2]"
-                    checked={duplicateStatusActive}
-                    onChange={e => setDuplicateStatusActive(e.target.checked)}
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
-                      Turn on copies
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <IconInfoCircle className="size-4 text-muted-foreground" strokeWidth={1.8} />
-                        </TooltipTrigger>
-                        <TooltipContent>Unchecked keeps every Meta object paused.</TooltipContent>
-                      </Tooltip>
-                    </span>
-                    <span className="mt-1 block text-xs leading-5 text-muted-foreground">If selected, copied objects are created active in Meta.</span>
-                  </span>
-                </label>
-              </>
-            )}
+            </section>
           </div>
 
           <DialogFooter className="border-t bg-muted/20 px-6 py-4">
@@ -5060,42 +4964,16 @@ function AdsManagerContent() {
                   Duplicate
                 </Button>
               </>
-            ) : duplicateStep === 1 ? (
+            ) : (
               <>
                 <Button variant="outline" onClick={() => setDuplicateDialogOpen(false)} disabled={isDuplicating}>Cancel</Button>
                 <Button
-                  variant="outline"
-                  onClick={() => setDuplicateStep(2)}
-                  disabled={isDuplicating}
-                >
-                  Choose destination
-                </Button>
-                <Button
-                  onClick={openDuplicatePublishConfirm}
-                  disabled={isDuplicating || (!duplicateRec1 && (tab === "ads" ? true : !duplicateRec2))}
-                  className="bg-[#1877f2] text-white hover:bg-[#166fe5]"
-                >
-                  {isDuplicating && <IconLoader2 className="mr-2 size-4 animate-spin" />}
-                  Apply and duplicate
-                </Button>
-              </>
-            ) : (
-              <>
-                <Button variant="outline" onClick={() => setDuplicateStep(1)} disabled={isDuplicating}>Back</Button>
-                <Button
-                  variant="outline"
-                  disabled={isDuplicating || !canDuplicate}
-                  onClick={() => executeDuplicate(false)}
-                >
-                  Draft
-                </Button>
-                <Button
                   onClick={openDuplicatePublishConfirm}
                   disabled={isDuplicating || !canDuplicate}
                   className="bg-[#1877f2] text-white hover:bg-[#166fe5]"
                 >
                   {isDuplicating && <IconLoader2 className="mr-2 size-4 animate-spin" />}
-                  Duplicate
+                  Next: choose status
                 </Button>
               </>
             )}
@@ -5107,20 +4985,29 @@ function AdsManagerContent() {
       <Dialog open={duplicateConfirmOpen} onOpenChange={open => !isDuplicating && setDuplicateConfirmOpen(open)}>
         <DialogContent className="gap-0 p-0 sm:max-w-[500px]">
           <DialogHeader className="border-b px-6 py-5 text-left">
-            <DialogTitle className="text-lg font-semibold text-foreground">Publish duplicates?</DialogTitle>
+            <DialogTitle className="text-lg font-semibold text-foreground">How should the copies be created?</DialogTitle>
           </DialogHeader>
           <div className="px-6 py-5 text-sm text-muted-foreground">
-            Would you like to publish these duplicated items to Meta now, or keep them as drafts to edit and publish later?
+            Create paused copies to review safely, or create them active so delivery can start immediately.
           </div>
-          <DialogFooter className="flex-row justify-between border-t bg-muted/20 px-6 py-4">
-            <Button variant="outline" onClick={() => setDuplicateConfirmOpen(false)} disabled={isDuplicating}>Cancel</Button>
-            <div className="flex gap-2">
+          <DialogFooter className="border-t bg-muted/20 px-6 py-4 sm:flex-row sm:justify-between">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDuplicateConfirmOpen(false)
+                setDuplicateDialogOpen(true)
+              }}
+              disabled={isDuplicating}
+            >
+              Back
+            </Button>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row">
               <Button
                 variant="outline"
                 disabled={isDuplicating}
                 onClick={() => executeDuplicate(false)}
               >
-                Keep publish later
+                Create paused
               </Button>
               <Button
                 className="bg-[#078f67] text-white hover:bg-[#067b59]"
@@ -5128,7 +5015,7 @@ function AdsManagerContent() {
                 onClick={() => executeDuplicate(true)}
               >
                 {isDuplicating && <IconLoader2 className="mr-1.5 size-4 animate-spin" />}
-                Publish now
+                Create and turn on
               </Button>
             </div>
           </DialogFooter>

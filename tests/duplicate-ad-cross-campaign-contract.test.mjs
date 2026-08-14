@@ -27,4 +27,17 @@ describe("Duplicate ad cross-campaign destination contract", () => {
     assert.match(route, /getResourceAccountId\(target_adset_id/)
     assert.match(route, /Target ad set access denied/)
   })
+
+  it("starts with the destination decision and uses truthful creation CTAs", () => {
+    const page = read("app/(dashboard)/ads-manager/page.tsx")
+
+    assert.doesNotMatch(page, /Choose recommendations to apply|Apply recommendations|Apply and duplicate|>\s*Choose destination\s*</)
+    assert.match(page, /"Keep in the same ad set"/)
+    assert.match(page, /"Copy to another ad set"/)
+    assert.match(page, /different ad set or campaign/)
+    assert.match(page, /\n\s+Next: choose status\r?\n/)
+    assert.match(page, /\n\s+Back\r?\n/)
+    assert.match(page, /\n\s+Create paused\r?\n/)
+    assert.match(page, /\n\s+Create and turn on\r?\n/)
+  })
 })
