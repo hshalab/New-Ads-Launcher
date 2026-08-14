@@ -9,6 +9,7 @@ import {
 import { uploadImageToMeta, uploadVideoToMeta, pollVideoReady } from "@/lib/facebook"
 import { emitAndLog } from "@/lib/notifications/emit"
 import { deleteMediaObject } from "@/lib/media-delete"
+import { isValidDateOnly, localDateRangeToUtc, parseTimezoneOffset } from "@/lib/local-date-range"
 
 // Large media uploads (videos can be 100MB+) — use Node runtime + extended timeout
 export const runtime = "nodejs"
@@ -48,6 +49,28 @@ function sanitizeFileName(fileName: string) {
   return fileName.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-")
 }
 
+function portalItem(creative: any) {
+  const value = creative.portal_media_items
+  return Array.isArray(value) ? value[0] : value
+}
+
+function creativeFacets(creatives: any[]) {
+  const brands = new Set<string>()
+  const products = new Set<string>()
+  const languages = new Set<string>()
+  for (const creative of creatives) {
+    const portal = portalItem(creative)
+    if (portal?.brand_name) brands.add(portal.brand_name)
+    if (portal?.product_name) products.add(portal.product_name)
+    if (portal?.language) languages.add(portal.language)
+  }
+  return {
+    brands: [...brands].sort(),
+    products: [...products].sort(),
+    languages: [...languages].sort(),
+  }
+}
+
 async function uploadOriginalToStorage(params: {
   orgId: string
   fileName: string
@@ -82,9 +105,23 @@ export async function GET(request: NextRequest) {
     const mediaType    = url.searchParams.get("media_type")   // "image" | "video"
     const statusFilter = url.searchParams.get("status")       // "uploaded" | "pending" | "processing" | "archived"
     const nameContains = url.searchParams.get("name_contains")
+    const readiness    = url.searchParams.get("readiness")
+    const brand        = url.searchParams.get("brand")
+    const product      = url.searchParams.get("product")
+    const language     = url.searchParams.get("language")
+    const dateFrom     = url.searchParams.get("date_from")
+    const dateTo       = url.searchParams.get("date_to")
+    const timezoneOffset = parseTimezoneOffset(url.searchParams.get("timezone_offset"))
+    const userOnly     = url.searchParams.get("user_only") === "true"
     const limit    = Math.min(parseInt(url.searchParams.get("limit") || "20", 10), 200)
     const cursor   = url.searchParams.get("cursor") || null
     const sortMode = url.searchParams.get("sort")
+    if ((dateFrom && !isValidDateOnly(dateFrom)) || (dateTo && !isValidDateOnly(dateTo))) {
+      return NextResponse.json({ error: "date_from and date_to must use YYYY-MM-DD" }, { status: 400 })
+    }
+    if (dateFrom && dateTo && dateFrom > dateTo) {
+      return NextResponse.json({ error: "date_from must not be after date_to" }, { status: 400 })
+    }
     const assignedSortOffset = sortMode === "assigned_desc"
       ? Math.max(parseInt(cursor || "0", 10) || 0, 0)
       : 0
@@ -126,22 +163,41 @@ export async function GET(request: NextRequest) {
 
         if (adAccountIds.length === 1) pageQuery = pageQuery.eq("ad_account_id", adAccountIds[0])
         else if (adAccountIds.length > 1) pageQuery = pageQuery.in("ad_account_id", adAccountIds)
-        if (mediaType) pageQuery = pageQuery.eq("media_type", mediaType)
-        if (statusFilter) pageQuery = pageQuery.eq("status", statusFilter)
-        if (nameContains) pageQuery = pageQuery.ilike("file_name", `%${nameContains}%`)
+        if (userOnly) pageQuery = pageQuery.eq("user_id", ctx.user.id)
 
         const { data: page, error: pageError } = await pageQuery
         if (pageError) throw pageError
         return page ?? []
       })
 
-      const sorted = sortCreativesByLatestAssignment(rows.map((creative) => mapCreativeForClient(creative)))
+      const scoped = rows.map((creative) => mapCreativeForClient(creative))
+      const facets = creativeFacets(scoped)
+      const { startIso, endExclusiveIso } = localDateRangeToUtc(dateFrom, dateTo, timezoneOffset)
+      const filtered = scoped.filter((creative: any) => {
+        if (mediaType && creative.media_type !== mediaType) return false
+        if (statusFilter && creative.status !== statusFilter) return false
+        if (nameContains && !creative.file_name?.toLowerCase().includes(nameContains.toLowerCase())) return false
+        const ready = Boolean(creative.fb_image_hash || creative.fb_video_id)
+        if (readiness === "ready" && !ready) return false
+        if (readiness === "pending" && ready) return false
+        const portal = portalItem(creative)
+        if (brand && portal?.brand_name !== brand) return false
+        if (product && portal?.product_name !== product) return false
+        if (language && portal?.language !== language) return false
+        const timestamp = Date.parse(creative.assigned_at || creative.created_at || "")
+        if (startIso && (!Number.isFinite(timestamp) || timestamp < Date.parse(startIso))) return false
+        if (endExclusiveIso && (!Number.isFinite(timestamp) || timestamp >= Date.parse(endExclusiveIso))) return false
+        return true
+      })
+      const sorted = sortCreativesByLatestAssignment(filtered)
       const items = sorted.slice(assignedSortOffset, assignedSortOffset + limit)
       const hasMore = assignedSortOffset + limit < sorted.length
       return NextResponse.json({
         creatives: items,
         hasMore,
         nextCursor: hasMore ? String(assignedSortOffset + limit) : null,
+        total: sorted.length,
+        facets,
       })
     }
 

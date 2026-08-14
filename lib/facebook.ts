@@ -373,20 +373,29 @@ export interface AdAccount {
 }
 
 export async function getAdAccounts(accessToken: string): Promise<AdAccount[]> {
-  const res = await fetch(
-    `${GRAPH_API_BASE}/me/adaccounts?fields=id,account_id,name,account_status,currency,amount_spent,balance,spend_cap,timezone_name,business{id,name}&limit=200&access_token=${accessToken}`
-  )
-  // Record headers (including X-Business-Use-Case-Usage) for the status monitor
-  try {
-    const { recordUsageHeaders } = await import("@/lib/rate-limit-store")
-    recordUsageHeaders(res.headers)
-  } catch {}
-  if (!res.ok) {
-    const error = await res.json()
-    throw new Error(error.error?.message || "Failed to get ad accounts")
+  let url: string | null = `${GRAPH_API_BASE}/me/adaccounts?fields=id,account_id,name,account_status,currency,amount_spent,balance,spend_cap,timezone_name,business{id,name}&limit=200&access_token=${accessToken}`
+  const accounts: AdAccount[] = []
+  const seen = new Set<string>()
+
+  for (let page = 0; url && page < 100; page++) {
+    if (seen.has(url)) throw new Error("Meta returned a repeated ad-account cursor")
+    seen.add(url)
+    const res: Response = await fetch(url)
+    try {
+      const { recordUsageHeaders } = await import("@/lib/rate-limit-store")
+      recordUsageHeaders(res.headers)
+    } catch {}
+    if (!res.ok) {
+      const error = await res.json()
+      throw new Error(error.error?.message || "Failed to get ad accounts")
+    }
+    const data: { data?: AdAccount[]; paging?: { next?: string } } = await res.json()
+    accounts.push(...(data.data || []))
+    url = data.paging?.next || null
   }
-  const data = await res.json()
-  return data.data || []
+
+  if (url) throw new Error("Ad-account list exceeded the 20,000-row safety limit")
+  return accounts
 }
 
 export interface FacebookPixel {

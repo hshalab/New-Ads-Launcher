@@ -9,13 +9,21 @@ const AD_ACCOUNTS_TTL_MS = 15 * 60 * 1000
 
 async function getSavedAdAccounts(orgId: string) {
   const supabase = createAdminClient()
-  const { data, error } = await supabase
-    .from("ad_accounts")
-    .select("fb_ad_account_id, fb_account_id, name, currency, account_status, amount_spent_minor, balance_minor, spend_cap_minor, timezone_name, owner_business_id, owner_business_name, ownership")
-    .eq("org_id", orgId)
-    .order("name")
+  const data: any[] = []
+  const pageSize = 1000
+  for (let from = 0; ; from += pageSize) {
+    const { data: page, error } = await supabase
+      .from("ad_accounts")
+      .select("fb_ad_account_id, fb_account_id, name, currency, account_status, amount_spent_minor, balance_minor, spend_cap_minor, timezone_name, owner_business_id, owner_business_name, ownership")
+      .eq("org_id", orgId)
+      .order("name")
+      .range(from, from + pageSize - 1)
 
-  if (error || !data?.length) return []
+    if (error) return []
+    data.push(...(page || []))
+    if (!page || page.length < pageSize) break
+  }
+  if (!data.length) return []
 
   return data.map((row: any) => ({
     id: row.fb_ad_account_id,

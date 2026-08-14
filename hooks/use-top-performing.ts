@@ -1,6 +1,8 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
+import { getPresetRange } from "@/components/ads-manager/AdsDateRangePicker"
+import { formatDateOnly } from "@/lib/local-date-range"
 
 export interface TopPerformingItem {
   rank: number
@@ -52,9 +54,12 @@ export function useTopPerforming(adAccountId: string | null, datePreset: string)
       setIsCached(false)
 
       try {
+        const range = getPresetRange(datePreset)
         const qs = new URLSearchParams({
           adAccountId,
           datePreset,
+          since: formatDateOnly(range.start),
+          until: formatDateOnly(range.end),
           ...(forceRefresh ? { refresh: "1" } : {}),
         })
         const res = await fetch(`/api/facebook/top-performing?${qs}`)

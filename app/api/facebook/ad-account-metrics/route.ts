@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getAuthContext } from "@/lib/auth"
 import { createAdminClient } from "@/lib/supabase/admin"
+import { localDateRangeToUtc, parseTimezoneOffset } from "@/lib/local-date-range"
 
 function normalizeAdAccountId(id?: string | null) {
   return (id || "").replace(/^act_/, "")
@@ -15,15 +16,17 @@ export async function GET(request: NextRequest) {
     const accountId = normalizeAdAccountId(params.get("account_id"))
     const dateFrom = params.get("date_from")
     const dateTo = params.get("date_to")
+    const timezoneOffset = parseTimezoneOffset(params.get("timezone_offset"))
     const limitParam = Number(params.get("limit") || 100)
-    // When fetching all accounts for a date range we pull more rows to allow JS dedup
     const isAllAccounts = !accountId && (dateFrom || dateTo)
-    const limit = isAllAccounts ? 3000 : (Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 500) : 100)
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 500) : 100
+    const { startIso, endExclusiveIso } = localDateRangeToUtc(dateFrom, dateTo, timezoneOffset)
+    if ((dateFrom && !startIso) || (dateTo && !endExclusiveIso)) {
+      return NextResponse.json({ error: "Invalid date range" }, { status: 400 })
+    }
 
     const supabase = createAdminClient()
-    let query = supabase
-      .from("ad_account_metrics_snapshots")
-      .select(`
+    const select = `
         id,
         fb_ad_account_id,
         fb_account_id,
@@ -37,32 +40,46 @@ export async function GET(request: NextRequest) {
         ownership,
         owner_business_name,
         synced_at
-      `)
-      .eq("org_id", ctx.orgId)
-      .order("synced_at", { ascending: false })
-      .limit(limit)
+      `
 
-    if (accountId) {
-      query = query.or(
-        `fb_account_id.eq.${accountId},fb_account_id.eq.act_${accountId},fb_ad_account_id.eq.${accountId},fb_ad_account_id.eq.act_${accountId}`
-      )
+    const fetchPage = async (from?: number, to?: number) => {
+      let query = supabase
+        .from("ad_account_metrics_snapshots")
+        .select(select)
+        .eq("org_id", ctx.orgId)
+        .order("synced_at", { ascending: false })
+
+      if (accountId) {
+        query = query.or(
+          `fb_account_id.eq.${accountId},fb_account_id.eq.act_${accountId},fb_ad_account_id.eq.${accountId},fb_ad_account_id.eq.act_${accountId}`
+        )
+      }
+      if (startIso) query = query.gte("synced_at", startIso)
+      if (endExclusiveIso) query = query.lt("synced_at", endExclusiveIso)
+      query = from !== undefined && to !== undefined ? query.range(from, to) : query.limit(limit)
+      return query
     }
 
-    if (dateFrom) {
-      query = query.gte("synced_at", dateFrom)
+    let snapshots: any[] = []
+    if (dateFrom || dateTo) {
+      const pageSize = 1000
+      for (let from = 0; ; from += pageSize) {
+        const { data, error } = await fetchPage(from, from + pageSize - 1)
+        if (error) {
+          console.error("Failed to fetch ad account metric snapshots:", error)
+          return NextResponse.json({ snapshots: [], warning: error.message })
+        }
+        snapshots.push(...(data || []))
+        if (!data || data.length < pageSize) break
+      }
+    } else {
+      const { data, error } = await fetchPage()
+      if (error) {
+        console.error("Failed to fetch ad account metric snapshots:", error)
+        return NextResponse.json({ snapshots: [], warning: error.message })
+      }
+      snapshots = data || []
     }
-    if (dateTo) {
-      query = query.lte("synced_at", dateTo + "T23:59:59.999Z")
-    }
-
-    const { data, error } = await query
-
-    if (error) {
-      console.error("Failed to fetch ad account metric snapshots:", error)
-      return NextResponse.json({ snapshots: [], warning: error.message })
-    }
-
-    let snapshots = data || []
 
     // When querying all accounts with a date range, keep only the latest snapshot per account
     if (isAllAccounts) {

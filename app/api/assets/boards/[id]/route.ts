@@ -23,14 +23,21 @@ export async function GET(_: NextRequest, { params }: { params: Promise<{ id: st
       return NextResponse.json({ error: "Board not found" }, { status: 404 })
     }
 
-    const { data: boardAssets, error } = await db
-      .from("board_assets")
-      .select("creative_id, added_at, creatives!inner(*)")
-      .eq("board_id", id)
-      .eq("creatives.org_id", ctx.orgId)
-      .order("added_at", { ascending: false })
+    const boardAssets: any[] = []
+    const pageSize = 1000
+    for (let from = 0; ; from += pageSize) {
+      const { data, error } = await db
+        .from("board_assets")
+        .select("creative_id, added_at, creatives!inner(*)")
+        .eq("board_id", id)
+        .eq("creatives.org_id", ctx.orgId)
+        .order("added_at", { ascending: false })
+        .range(from, from + pageSize - 1)
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      boardAssets.push(...(data || []))
+      if (!data || data.length < pageSize) break
+    }
 
     const creatives = (boardAssets || []).flatMap((boardAsset) => {
       const nestedCreative = boardAsset.creatives

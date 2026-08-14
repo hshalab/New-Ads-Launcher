@@ -12,11 +12,13 @@ export async function GET(request: NextRequest) {
     const adAccountId = searchParams.get("ad_account_id")
 
     const db = createAdminClient()
-    const { data, error } = await db
+    let query = db
       .from("ad_copy_templates")
       .select("*")
       .eq("org_id", ctx.orgId)
       .order("created_at", { ascending: false })
+    if (adAccountId) query = query.eq("ad_account_id", adAccountId)
+    const { data, error } = await query
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
     return NextResponse.json({ templates: data || [] })

@@ -28,19 +28,24 @@ export const DATE_PICKER_PRESETS = [
 // start would display a range the API cannot fulfil (returns "Invalid time range").
 const META_INSIGHTS_MAX_LOOKBACK_MONTHS = 37
 
-function metaInsightsFloor(today: Date): Date {
+function metaInsightsFloor(today: Date, months: number): Date {
   const floor = new Date(today)
-  floor.setMonth(floor.getMonth() - META_INSIGHTS_MAX_LOOKBACK_MONTHS)
+  floor.setMonth(floor.getMonth() - months)
   floor.setHours(0, 0, 0, 0)
   return floor
 }
 
-export function getPresetRange(preset: string, maximumStart?: Date): { start: Date; end: Date } {
+export function getPresetRange(
+  preset: string,
+  maximumStart?: Date,
+  maximumLookbackMonths: number | null = META_INSIGHTS_MAX_LOOKBACK_MONTHS,
+): { start: Date; end: Date } {
   const today = new Date(); today.setHours(0, 0, 0, 0)
   const d = (n: number) => { const x = new Date(today); x.setDate(x.getDate() + n); return x }
   switch (preset) {
     case "maximum": {
-      const floor = metaInsightsFloor(today)
+      if (maximumLookbackMonths === null) return { start: maximumStart ?? new Date(1970, 0, 1), end: today }
+      const floor = metaInsightsFloor(today, maximumLookbackMonths)
       const raw = maximumStart ?? floor
       return { start: raw < floor ? floor : raw, end: today }
     }
@@ -191,6 +196,8 @@ interface Props {
   allowAllTime?: boolean
   allTimeLabel?: string
   onClose?: () => void
+  timezoneLabel?: string
+  maximumLookbackMonths?: number | null
 }
 
 type Mode = "preset" | "custom"
@@ -201,7 +208,8 @@ const PANEL_MARGIN = 8
 export function AdsDateRangePicker({
   preset, customStart, customEnd, accountId, onChange,
   inline = false, autoApply = false, hideLabel = false,
-  allowAllTime = false, allTimeLabel = "All time", onClose,
+  allowAllTime = false, allTimeLabel = "All time", onClose, timezoneLabel,
+  maximumLookbackMonths = META_INSIGHTS_MAX_LOOKBACK_MONTHS,
 }: Props) {
   const [maxStart, setMaxStart] = useState<Date | null>(null)
   const [open,        setOpen]        = useState(inline)
@@ -271,7 +279,7 @@ export function AdsDateRangePicker({
     } else {
       setMode("preset")
       setPending(preset)
-      const { start, end } = getPresetRange(preset, maxStart ?? undefined)
+      const { start, end } = getPresetRange(preset, maxStart ?? undefined, maximumLookbackMonths)
       setRangeStart(start)
       setRangeEnd(end)
       setLeftYear(start.getFullYear())
@@ -291,7 +299,7 @@ export function AdsDateRangePicker({
   useEffect(() => {
     if (!maxStart) return
     if (pending === "maximum" || preset === "maximum") {
-      const { start, end } = getPresetRange("maximum", maxStart)
+      const { start, end } = getPresetRange("maximum", maxStart, maximumLookbackMonths)
       setRangeStart(start)
       setRangeEnd(end)
       if (preset === "maximum") onChange("maximum", start, end)
@@ -348,7 +356,7 @@ export function AdsDateRangePicker({
       }
       return
     }
-    const { start, end } = getPresetRange(p, maxStart ?? undefined)
+    const { start, end } = getPresetRange(p, maxStart ?? undefined, maximumLookbackMonths)
     setRangeStart(start)
     setRangeEnd(end)
     setLeftYear(start.getFullYear())
@@ -424,7 +432,7 @@ export function AdsDateRangePicker({
       return `Maximum: ${fmt(customStart)} – ${fmt(customEnd)}`
     const p = DATE_PICKER_PRESETS.find(x => x.value === preset)
     if (!p) return allowAllTime ? allTimeLabel : "Select range"
-    const { start, end } = getPresetRange(preset, maxStart ?? undefined)
+    const { start, end } = getPresetRange(preset, maxStart ?? undefined, maximumLookbackMonths)
     return `${p.label}: ${fmt(start)} – ${fmt(end)}`
   })()
 
@@ -563,7 +571,11 @@ export function AdsDateRangePicker({
           </div>
 
           <div className="flex items-center justify-between mt-4 pt-3 border-t">
-            <span className="text-[11px] text-muted-foreground">Dates are shown in Pacific Time</span>
+            <span className="text-[11px] text-muted-foreground">
+              {timezoneLabel ?? (accountId
+                ? "Meta reports dates in the selected ad account's timezone"
+                : "Dates use your local timezone")}
+            </span>
             {!autoApply && (
               <div className="flex items-center gap-2">
                 <button

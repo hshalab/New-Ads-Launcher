@@ -1651,12 +1651,13 @@ function AdsManagerContent() {
   // ─── Data fetch (fetch all, filter client-side) ──────────────────────────────
 
   const buildDateParam = useCallback(() => {
-    return (datePreset === "custom" || datePreset === "maximum") && customDateRange
-      ? `time_range=${encodeURIComponent(JSON.stringify({
-          since: formatMetaDate(customDateRange.start),
-          until: formatMetaDate(customDateRange.end),
-        }))}`
-      : `date_preset=${datePreset}`
+    const range = (datePreset === "custom" || datePreset === "maximum") && customDateRange
+      ? customDateRange
+      : getPresetRange(datePreset)
+    return `time_range=${encodeURIComponent(JSON.stringify({
+      since: formatMetaDate(range.start),
+      until: formatMetaDate(range.end),
+    }))}`
   }, [datePreset, customDateRange])
 
   // Fetches campaigns/adsets/ads only — `breakdowns` intentionally excluded from
@@ -2368,6 +2369,14 @@ function AdsManagerContent() {
       setLoading(false)
     }
   }, [selectedAccountId, paging.hasNext, buildDateParam, page, tab, statusFilter, campaigns, adSets, ads, hierarchyParentIds, hierarchyParentId, hierarchyParentType])
+
+  // Client filters are only truthful after the cursor chain is drained. This also
+  // covers restored filters on page load; sorting already calls the same seam.
+  useEffect(() => {
+    if ((search.trim() || chips.length > 0 || statusFilter === "PAUSED") && paging.hasNext) {
+      void fetchAllRemainingRows()
+    }
+  }, [search, chips, statusFilter, paging.hasNext, fetchAllRemainingRows])
 
   /**
    * Three states per column: ascending → descending → default.

@@ -10,6 +10,7 @@
 // 4,700-line page from growing another 300.
 
 import { COLUMN_MAP, type ColumnDef } from "./column-config"
+import { localDateRangeToUtc } from "./local-date-range"
 
 export type FilterLevel = "campaigns" | "adsets" | "ads"
 export type FilterFieldType = NonNullable<ColumnDef["filterType"]>
@@ -232,14 +233,20 @@ function matchDate(op: FilterOperator, createdAt: string | null, values: string[
     if (!Number.isFinite(days)) return true
     return t >= Date.now() - days * 86_400_000
   }
-  const a = new Date(values[0]).getTime()
-  if (!Number.isFinite(a)) return true
+  const offset = new Date().getTimezoneOffset()
+  const first = localDateRangeToUtc(values[0], values[0], offset)
+  const a = first.startIso ? Date.parse(first.startIso) : Number.NaN
+  const aEnd = first.endExclusiveIso ? Date.parse(first.endExclusiveIso) : Number.NaN
+  if (!Number.isFinite(a) || !Number.isFinite(aEnd)) return true
   switch (op) {
     case "before": return t < a
-    case "after":  return t > a
+    case "after":  return t >= aEnd
     case "between": {
-      const b = new Date(values[1]).getTime()
-      return Number.isFinite(b) ? t >= Math.min(a, b) && t <= Math.max(a, b) : t >= a
+      const second = localDateRangeToUtc(values[1], values[1], offset)
+      const b = second.startIso ? Date.parse(second.startIso) : Number.NaN
+      const bEnd = second.endExclusiveIso ? Date.parse(second.endExclusiveIso) : Number.NaN
+      if (!Number.isFinite(b) || !Number.isFinite(bEnd)) return t >= a && t < aEnd
+      return t >= Math.min(a, b) && t < Math.max(aEnd, bEnd)
     }
     default: return true
   }

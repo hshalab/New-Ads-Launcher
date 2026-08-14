@@ -191,11 +191,15 @@ export function AdAccountsManager() {
 
   useEffect(() => { fetchAccounts() }, [fetchAccounts])
 
-  const fetchLimitSnapshots = useCallback(async (accountId: string) => {
+  const fetchLimitSnapshots = useCallback(async (accountId: string, from = "", to = "") => {
     if (!accountId) { setLimitSnapshots([]); return }
     setLimitLoading(true)
     try {
-      const res = await fetch(`/api/facebook/ad-account-metrics?account_id=${encodeURIComponent(accountId)}&limit=200`)
+      const params = new URLSearchParams({ account_id: accountId, limit: "200" })
+      if (from) params.set("date_from", from)
+      if (to) params.set("date_to", to)
+      params.set("timezone_offset", String(new Date().getTimezoneOffset()))
+      const res = await fetch(`/api/facebook/ad-account-metrics?${params}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || "Failed to fetch spending limit history")
       setLimitSnapshots(data.snapshots || [])
@@ -209,9 +213,9 @@ export function AdAccountsManager() {
 
   useEffect(() => {
     if (activeTab === "overview" && selectedAccountId) {
-      fetchLimitSnapshots(selectedAccountId)
+      fetchLimitSnapshots(selectedAccountId, dateFrom, dateTo)
     }
-  }, [activeTab, selectedAccountId, fetchLimitSnapshots])
+  }, [activeTab, selectedAccountId, dateFrom, dateTo, fetchLimitSnapshots])
 
   // A different account or date range is a different list — never carry the expanded window over.
   useEffect(() => {
@@ -225,6 +229,7 @@ export function AdAccountsManager() {
       const params = new URLSearchParams()
       if (from) params.set("date_from", from)
       if (to) params.set("date_to", to)
+      params.set("timezone_offset", String(new Date().getTimezoneOffset()))
       const res = await fetch(`/api/facebook/ad-account-metrics?${params}`)
       const data = await res.json()
       setHistoricalAccounts(data.snapshots || [])
@@ -322,7 +327,7 @@ export function AdAccountsManager() {
       .filter(row => {
         if (dateFrom) {
           const start = new Date(row.startDate)
-          if (start < new Date(dateFrom)) return false
+          if (start < new Date(dateFrom + "T00:00:00")) return false
         }
         if (dateTo) {
           const start = new Date(row.startDate)
@@ -439,6 +444,7 @@ export function AdAccountsManager() {
               <div className="flex shrink-0 items-center gap-2">
                 <AdsDateRangePicker
                   preset={acctDatePreset}
+                  maximumLookbackMonths={null}
                   customStart={acctDateFrom ? new Date(acctDateFrom + "T00:00:00") : undefined}
                   customEnd={acctDateTo ? new Date(acctDateTo + "T00:00:00") : undefined}
                   onChange={(preset, start, end) => {
@@ -501,7 +507,7 @@ export function AdAccountsManager() {
               />
 
               <Button
-                onClick={async () => { await fetchAccounts(true); if (selectedAccountId) await fetchLimitSnapshots(selectedAccountId) }}
+                onClick={async () => { await fetchAccounts(true); if (selectedAccountId) await fetchLimitSnapshots(selectedAccountId, dateFrom, dateTo) }}
                 disabled={syncing}
                 className="h-9 shrink-0 rounded-full bg-primary px-5 text-sm font-semibold text-white shadow-none transition-colors hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground"
               >
@@ -514,9 +520,11 @@ export function AdAccountsManager() {
             <div className="flex flex-wrap items-center gap-2">
               <AdsDateRangePicker
                 preset={datePreset}
+                maximumLookbackMonths={null}
                 customStart={dateFrom ? new Date(dateFrom + "T00:00:00") : undefined}
                 customEnd={dateTo ? new Date(dateTo + "T00:00:00") : undefined}
                 accountId={selectedAccount?.account_id}
+                timezoneLabel="Snapshot dates use your local timezone"
                 onChange={(preset, start, end) => {
                   setDatePreset(preset)
                   if (preset === "custom" || preset === "maximum") {

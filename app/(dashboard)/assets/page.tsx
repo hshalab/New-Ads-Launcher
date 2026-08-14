@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback, useMemo } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo, useDeferredValue } from "react"
 import { useSearchParams } from "next/navigation"
 import { useAdAccount } from "@/lib/ad-account-context"
 import { cn } from "@/lib/utils"
@@ -33,6 +33,7 @@ import { MetaAssignmentStatus } from "@/components/shared/meta-assignment-status
 import { useMetaAssignmentProgress } from "@/hooks/use-meta-assignment-progress"
 import { sortCreativesByLatestAssignment, type PortalMediaItemRow } from "@/lib/creative-media"
 import { getRangeToggledIds } from "@/lib/range-selection"
+import { formatDateOnly } from "@/lib/local-date-range"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -310,6 +311,7 @@ export default function AssetsPage() {
   const [selected, setSelected]         = useState<Set<string>>(new Set())
   const [assetAnchorId, setAssetAnchorId] = useState<string | null>(null)
   const [search, setSearch]             = useState(urlSearch)
+  const deferredSearch = useDeferredValue(search)
   const [filterType, setFilterType]     = useState<"" | "image" | "video">("")
   const [filterStatus, setFilterStatus] = useState<"" | "ready" | "pending">("")
   const [filterBrand, setFilterBrand]   = useState<string>("")
@@ -386,6 +388,11 @@ export default function AssetsPage() {
   const [creativesNextCursor, setCreativesNextCursor] = useState<string | null>(null)
   const [creativesHasMore, setCreativesHasMore]       = useState(false)
   const [loadingMoreCreatives, setLoadingMoreCreatives] = useState(false)
+  const [creativeTotal, setCreativeTotal] = useState(0)
+  const [assetFacets, setAssetFacets] = useState<{ brands: string[]; products: string[]; languages: string[] }>({
+    brands: [], products: [], languages: [],
+  })
+  const creativeRequestId = useRef(0)
   const CREATIVES_PAGE = 20
 
   const pollingVideosRef = useRef<Set<string>>(new Set())
@@ -522,25 +529,49 @@ export default function AssetsPage() {
     // Empty assetFilterAccounts = "All ad accounts" (no ad_account_id param => org-wide).
     // Picking one or more accounts narrows the fetch to exactly those accounts.
     if (reset) setLoadingCreatives(true); else setLoadingMoreCreatives(true)
+    const requestId = ++creativeRequestId.current
     setActionError("")
     const params = new URLSearchParams({ limit: String(CREATIVES_PAGE), sort: "assigned_desc" })
     for (const id of assetFilterAccounts) params.append("ad_account_id", id)
+    if (section === "my-uploads") params.set("user_only", "true")
+    if (deferredSearch.trim()) params.set("name_contains", deferredSearch.trim())
+    if (filterType) params.set("media_type", filterType)
+    if (filterStatus) params.set("readiness", filterStatus)
+    if (filterBrand) params.set("brand", filterBrand)
+    if (filterProduct) params.set("product", filterProduct)
+    if (filterLanguage) params.set("language", filterLanguage)
+    if (dateRange) {
+      const range = (dateRange === "custom" || dateRange === "maximum") && dateCustomStart && dateCustomEnd
+        ? { start: dateCustomStart, end: dateCustomEnd }
+        : getPresetRange(dateRange)
+      params.set("date_from", formatDateOnly(range.start))
+      params.set("date_to", formatDateOnly(range.end))
+      params.set("timezone_offset", String(new Date().getTimezoneOffset()))
+    }
     if (cursor) params.set("cursor", cursor)
     fetch(`/api/creatives?${params}`)
       .then(r => r.json())
       .then(d => {
+        if (requestId !== creativeRequestId.current) return
         if (d.error) throw new Error(d.error)
         const next: Creative[] = d.creatives || []
         setCreatives(prev => reset ? next : [...prev, ...next])
         setCreativesNextCursor(d.nextCursor ?? null)
         setCreativesHasMore(d.hasMore ?? false)
+        setCreativeTotal(Number.isFinite(d.total) ? d.total : next.length)
+        if (d.facets) setAssetFacets(d.facets)
         refreshVideoPreviews(next)
       })
       .catch((error: unknown) => {
+        if (requestId !== creativeRequestId.current) return
         setActionError(error instanceof Error ? error.message : "Failed to load assets")
       })
-      .finally(() => { setLoadingCreatives(false); setLoadingMoreCreatives(false) })
-  }, [refreshVideoPreviews, assetFilterAccounts])
+      .finally(() => {
+        if (requestId !== creativeRequestId.current) return
+        setLoadingCreatives(false)
+        setLoadingMoreCreatives(false)
+      })
+  }, [refreshVideoPreviews, assetFilterAccounts, section, deferredSearch, filterType, filterStatus, filterBrand, filterProduct, filterLanguage, dateRange, dateCustomStart, dateCustomEnd])
 
   const loadBoards = useCallback(() => {
     setLoadingBoards(true)
@@ -793,23 +824,7 @@ export default function AssetsPage() {
   }, [portalFileMap])
 
 
-  // Automatically derive available brands/products/languages from the loaded creatives
-  const availableFilters = useMemo(() => {
-    const brands = new Set<string>()
-    const products = new Set<string>()
-    const languages = new Set<string>()
-    creatives.forEach(c => {
-      const pm = resolvePortalMetadata(c)
-      if (pm?.brandName) brands.add(pm.brandName)
-      if (pm?.productName) products.add(pm.productName)
-      if (pm?.language) languages.add(pm.language)
-    })
-    return {
-      brands: Array.from(brands).sort(),
-      products: Array.from(products).sort(),
-      languages: Array.from(languages).sort(),
-    }
-  }, [creatives, portalFileMap])
+  const availableFilters = assetFacets
 
   const filterCreatives = useCallback((list: Creative[]) => {
     const q = search.toLowerCase()
@@ -2047,6 +2062,7 @@ export default function AssetsPage() {
                   customStart={dateCustomStart}
                   customEnd={dateCustomEnd}
                   allowAllTime
+                  maximumLookbackMonths={null}
                   autoApply
                   onChange={(preset, start, end) => {
                     setDateRange(preset)
@@ -2117,7 +2133,7 @@ export default function AssetsPage() {
                 {currentBoardId && currentBoard ? (
                   <span className="font-medium text-foreground">{currentBoard.name}</span>
                 ) : section === "my-uploads" ? "My Uploads" : "All Assets"}
-                {" — "}{displayList.length} of {currentBoardId ? boardCreatives.length : creatives.length} assets
+                {" — "}{displayList.length} of {currentBoardId ? boardCreatives.length : creativeTotal} assets
               </span>
               {search && (
                 <button onClick={saveSearch} className="text-link hover:underline">Save search</button>
