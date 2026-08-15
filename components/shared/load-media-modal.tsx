@@ -1504,7 +1504,10 @@ export function LoadMediaModal({
 
   return (
     <Dialog open={open} onOpenChange={v => !v && onClose()}>
-      <DialogContent className="max-w-6xl h-[94vh] flex flex-col p-0 gap-0">
+      <DialogContent
+        className="z-[70] max-w-6xl h-[94vh] flex flex-col p-0 gap-0"
+        overlayClassName="z-[70]"
+      >
         <DialogHeader className="px-6 py-3 border-b shrink-0">
           <DialogTitle className="text-base font-semibold">Select media to use</DialogTitle>
         </DialogHeader>

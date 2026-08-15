@@ -28,6 +28,8 @@ import { allowedPerformanceGoals } from "@/lib/workspace-odax-guard"
 import { BID_STRATEGY_LABEL } from "@/lib/create-campaign-bidding"
 import type { TargetingInput } from "@/lib/create-campaign-targeting"
 import type { Creative } from "@/types/creative"
+import { partsInTimeZone, wallClockToUtcIso } from "@/lib/timezone"
+import { EditableCard, EditableCardBlock, EditableField } from "./create-flow/EditableField"
 
 type FbPage = {
   id: string
@@ -145,6 +147,7 @@ type Props = {
   onRefresh?: () => void
   onDraftChange?: (node: WorkspaceNode, level: Level) => void
   accountId?: string
+  timezoneName?: string
   /**
    * The parent campaign's Meta objective. The ad set node does not carry it, and without it the
    * performance-goal list cannot be resolved from `lib/odax-matrix.ts` (TD-42).
@@ -163,14 +166,6 @@ type Props = {
   /** Materialize new/changed hierarchy as real, PAUSED Meta objects. Distinct from Publish. */
   onSaveDraft?: () => void
   savingDraft?: boolean
-  /**
-   * Reverse of Save Draft: delete on Meta the objects this session created there. Deliberately a
-   * separate control from "Discard local edit" — one clears this browser, this one deletes on Meta.
-   */
-  onDiscardOnMeta?: () => void
-  /** How many Meta objects this session created and can still delete. 0 → the control is disabled. */
-  metaDraftCount?: number
-  discardingOnMeta?: boolean
   /** Hierarchy panel control, hoisted into the shared top chrome. Omitted → no button rendered. */
   onTogglePanel?: () => void
   panelOpen?: boolean
@@ -268,8 +263,41 @@ const DEVICE_LABEL: Record<string, string> = {
 const PLACEMENT_PLATFORMS = ["facebook", "instagram", "audience_network", "messenger"]
 const PLACEMENT_DEVICES = ["mobile", "desktop"]
 
-function formatDateTime(value?: string) {
-  return value ? value.slice(0, 16) : ""
+function formatDateTime(value?: string, timeZone?: string) {
+  if (!value) return ""
+  if (!timeZone) return value.slice(0, 16)
+  const parts = partsInTimeZone(new Date(value), timeZone)
+  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}T${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}`
+}
+
+function scheduleToUtc(value: string, basis: "account" | "utc", timezoneName?: string) {
+  if (!value) return ""
+  if (basis === "account" && timezoneName) return wallClockToUtcIso(value, timezoneName) || ""
+  return new Date(`${value}:00Z`).toISOString()
+}
+
+const countryDisplayNames = typeof Intl !== "undefined" && Intl.DisplayNames
+  ? new Intl.DisplayNames(["en"], { type: "region" })
+  : null
+
+function locationsSummary(geo?: GeoLocations, excluded?: GeoLocations) {
+  if (!hasAnyLocation(geo)) return "No locations set"
+  const names = [
+    ...(geo?.countries || []).map(code => {
+      try { return countryDisplayNames?.of(code) || code } catch { return code }
+    }),
+    ...(geo?.regions || []).map(region => region.name || region.key),
+    ...(geo?.cities || []).map(city => city.name || city.key),
+  ]
+  const shown = names.slice(0, 3).join(", ")
+  const remaining = names.length - 3
+  let summary = remaining > 0 ? `${shown} +${remaining} more` : shown
+  const excludedCount = hasAnyLocation(excluded)
+    ? (excluded?.countries?.length || 0) + (excluded?.regions?.length || 0) + (excluded?.cities?.length || 0)
+      + (excluded?.zips?.length || 0) + (excluded?.geo_markets?.length || 0)
+    : 0
+  if (excludedCount > 0) summary += ` · ${excludedCount} excluded`
+  return summary
 }
 
 function Section({
@@ -307,6 +335,68 @@ function Section({
       </div>
       {children}
     </section>
+  )
+}
+
+function VariationFields({
+  draft,
+  updateCreative,
+}: {
+  draft: WorkspaceNode
+  updateCreative: (updates: Partial<WorkspaceNode>) => void
+}) {
+  const fields: Array<[
+    string,
+    "primary_text_variations" | "headline_variations" | "description_variations",
+    string,
+  ]> = [
+    ["Primary text variations", "primary_text_variations", "Primary text variation"],
+    ["Headline variations", "headline_variations", "Headline variation"],
+    ["Description variations", "description_variations", "Description variation"],
+  ]
+
+  return (
+    <div className="space-y-4">
+      {fields.map(([label, key, placeholder]) => {
+        const values = draft[key] || []
+        return (
+          <div key={key} className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <Label className="text-xs text-muted-foreground">{label}</Label>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={() => updateCreative({ [key]: [...values, ""] })}
+              >
+                Add variation
+              </Button>
+            </div>
+            {values.map((value, index) => (
+              <div key={`${key}-${index}`} className="flex gap-2">
+                <Input
+                  value={value}
+                  placeholder={placeholder}
+                  onChange={event => updateCreative({
+                    [key]: values.map((item, itemIndex) => itemIndex === index ? event.target.value : item),
+                  })}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-label={`Remove ${label} ${index + 1}`}
+                  onClick={() => updateCreative({ [key]: values.filter((_, itemIndex) => itemIndex !== index) })}
+                >
+                  Remove
+                </Button>
+              </div>
+            ))}
+          </div>
+        )
+      })}
+    </div>
   )
 }
 
@@ -513,6 +603,7 @@ export function UnifiedWorkspaceEditor({
   onRefresh,
   onDraftChange,
   accountId = "",
+  timezoneName,
   campaignObjective,
   hierarchyPath,
   hasDraft = false,
@@ -524,9 +615,6 @@ export function UnifiedWorkspaceEditor({
   onCreateChild,
   onSaveDraft,
   savingDraft = false,
-  onDiscardOnMeta,
-  metaDraftCount = 0,
-  discardingOnMeta = false,
   onTogglePanel,
   panelOpen = false,
   panelDisabled = false,
@@ -974,36 +1062,55 @@ export function UnifiedWorkspaceEditor({
               </Section>
 
               {level === "campaign" && (
-                <Section title="Campaign structure" locked>
-                  <div className="grid grid-cols-2 gap-2">
-                    <LockedControl label="Buying type" value={draft.buying_type || "AUCTION"} />
-                    <LockedControl
-                      label="Objective"
-                      value={OBJECTIVE_LABEL[draft.objective || ""] || draft.objective || "—"}
-                    />
-                    {draft.bid_strategy && (
+                <EditableCard<WorkspaceNode>
+                  title="Campaign structure"
+                  readOnly
+                  snapshot={draft}
+                  onRestore={setDraft}
+                >
+                  <EditableCardBlock>
+                    <div className="grid grid-cols-2 gap-2">
+                      <LockedControl label="Buying type" value={draft.buying_type || "AUCTION"} />
                       <LockedControl
-                        label="Bid strategy"
-                        value={BID_LABEL[draft.bid_strategy] || draft.bid_strategy}
+                        label="Objective"
+                        value={OBJECTIVE_LABEL[draft.objective || ""] || draft.objective || "—"}
                       />
-                    )}
-                  </div>
-                  <div className="mt-3 space-y-1.5">
-                    <Label className="text-xs text-muted-foreground">Special Ad Categories</Label>
-                    <input
-                      type="text"
-                      disabled
-                      value={(draft.special_ad_categories || []).length
-                        ? (draft.special_ad_categories || []).join(", ")
-                        : "None"}
-                      className={lockedControlClass}
-                      aria-disabled="true"
-                    />
-                  </div>
-                  <p className="mt-3 text-xs text-muted-foreground">
-                    Locked after create. Changing objective, buying type, or special categories needs a replacement hierarchy.
-                  </p>
-                </Section>
+                      {draft.bid_strategy && (
+                        <LockedControl
+                          label="Bid strategy"
+                          value={BID_LABEL[draft.bid_strategy] || draft.bid_strategy}
+                        />
+                      )}
+                    </div>
+                  </EditableCardBlock>
+                  <EditableField
+                    id="special-ad-categories"
+                    label="Special Ad Categories"
+                    always
+                    display={(draft.special_ad_categories || []).join(", ") || "None"}
+                  >
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {["HOUSING", "EMPLOYMENT", "CREDIT", "ISSUES_ELECTIONS_POLITICS"].map(category => {
+                        const selected = (draft.special_ad_categories || []).includes(category)
+                        return (
+                          <label key={category} className="flex items-center gap-2 text-xs">
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={event => setDraft({
+                                ...draft,
+                                special_ad_categories: event.target.checked
+                                  ? [...(draft.special_ad_categories || []), category]
+                                  : (draft.special_ad_categories || []).filter(value => value !== category),
+                              })}
+                            />
+                            {category.replaceAll("_", " ")}
+                          </label>
+                        )
+                      })}
+                    </div>
+                  </EditableField>
+                </EditableCard>
               )}
 
               {level === "campaign" && (
@@ -1263,8 +1370,11 @@ export function UnifiedWorkspaceEditor({
                         <Input
                           type="datetime-local"
                           className="text-xs"
-                          value={formatDateTime(draft.start_time)}
-                          onChange={event => setDraft({ ...draft, start_time: event.target.value ? new Date(event.target.value).toISOString() : "" })}
+                          value={formatDateTime(draft.start_time, draft.schedule_time_basis === "account" ? timezoneName : "UTC")}
+                          onChange={event => setDraft({
+                            ...draft,
+                            start_time: scheduleToUtc(event.target.value, draft.schedule_time_basis || "account", timezoneName),
+                          })}
                         />
                       </div>
                       <div className="space-y-1.5">
@@ -1274,14 +1384,35 @@ export function UnifiedWorkspaceEditor({
                         <Input
                           type="datetime-local"
                           className="text-xs"
-                          value={formatDateTime(draft.end_time)}
-                          onChange={event => {
-                            const value = event.target.value ? new Date(event.target.value).toISOString() : ""
-                            setDraft({ ...draft, end_time: value })
-                          }}
+                          value={formatDateTime(draft.end_time, draft.schedule_time_basis === "account" ? timezoneName : "UTC")}
+                          onChange={event => setDraft({
+                            ...draft,
+                            end_time: scheduleToUtc(event.target.value, draft.schedule_time_basis || "account", timezoneName),
+                          })}
                         />
                       </div>
                     </div>
+                    <EditableCard<WorkspaceNode>
+                      title="Schedule options"
+                      readOnly
+                      snapshot={draft}
+                      onRestore={setDraft}
+                    >
+                      <EditableField
+                        id="schedule-time-basis"
+                        label="Time basis"
+                        display={draft.schedule_time_basis === "utc" ? "UTC" : `Ad account time (${timezoneName || "account timezone"})`}
+                      >
+                        <select
+                          className={cn(selectControlClass, "mt-2")}
+                          value={draft.schedule_time_basis || "account"}
+                          onChange={event => setDraft({ ...draft, schedule_time_basis: event.target.value as "account" | "utc" })}
+                        >
+                          <option value="account">Ad account time ({timezoneName || "account timezone"})</option>
+                          <option value="utc">UTC</option>
+                        </select>
+                      </EditableField>
+                    </EditableCard>
                     {pacing.length > 0 && (
                       <p className="mt-3 rounded-md border border-dashed bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                         Pacing: {pacing.join(", ")} · read-only
@@ -1289,8 +1420,19 @@ export function UnifiedWorkspaceEditor({
                     )}
                   </Section>
 
-                  <Section title="Attribution setting">
-                    <div className="grid grid-cols-3 gap-3">
+
+                  <EditableCard<WorkspaceNode>
+                    title="Attribution setting"
+                    readOnly
+                    snapshot={draft}
+                    onRestore={setDraft}
+                  >
+                  <EditableField
+                    id="attribution-setting"
+                    label="Attribution setting"
+                    display={(draft.attribution_spec || []).map(item => `${item.event_type.toLowerCase().replaceAll("_", " ")} ${item.window_days}d`).join(" · ")}
+                  >
+                    <div className="mt-2 grid grid-cols-3 gap-3">
                       <div className="space-y-1.5">
                         <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Click-through</Label>
                         <select
@@ -1342,13 +1484,21 @@ export function UnifiedWorkspaceEditor({
                         </select>
                       </div>
                     </div>
-                  </Section>
+                  </EditableField>
+                  </EditableCard>
 
-                  <Section
+                  <EditableCard<WorkspaceNode>
                     title="Audience"
                     subtitle="Controls are hard limits. Suggestions are signals Advantage+ may expand on."
+                    readOnly
+                    snapshot={draft}
+                    onRestore={setDraft}
                   >
-                    <div className="space-y-4">
+                    <EditableField
+                      id="audience-locations"
+                      label="Locations"
+                      display={locationsSummary(draft.targeting?.geo_locations, draft.targeting?.excluded_geo_locations)}
+                    >
                       <SplitBlock title="Controls">
                         <p className="text-xs text-muted-foreground">
                           We won&apos;t reach people beyond these selections.
@@ -1369,29 +1519,52 @@ export function UnifiedWorkspaceEditor({
                             },
                           })}
                         />
-                        <div className="space-y-1.5">
-                          <Label className="text-xs text-muted-foreground">Minimum age (control)</Label>
-                          <select
-                            className={cn(selectControlClass, "max-w-[120px]")}
-                            value={draft.targeting?.age_min || 18}
-                            onChange={e => setDraft({
-                              ...draft,
-                              targeting: { ...draft.targeting, age_min: parseInt(e.target.value) },
-                            })}
-                          >
-                            {Array.from({ length: 48 }, (_, i) => i + 18).map(age => (
-                              <option key={age} value={age}>{age}</option>
-                            ))}
-                          </select>
-                        </div>
-                        {excludedCustomAudiences.length > 0 && (
-                          <ReadOnlyChips
-                            label="Excluded custom audiences"
-                            values={excludedCustomAudiences.map(aud => aud.name || aud.id)}
-                          />
-                        )}
                       </SplitBlock>
+                    </EditableField>
 
+                    <EditableField id="audience-min-age" label="Minimum age (control)" always>
+                      <div className="space-y-1.5">
+                        <select
+                          className={cn(selectControlClass, "max-w-[120px]")}
+                          value={draft.targeting?.age_min || 18}
+                          onChange={e => setDraft({
+                            ...draft,
+                            targeting: { ...draft.targeting, age_min: parseInt(e.target.value) },
+                          })}
+                        >
+                          {Array.from({ length: 48 }, (_, i) => i + 18).map(age => (
+                            <option key={age} value={age}>{age}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </EditableField>
+
+                    <EditableField
+                      id="excluded-custom-audiences"
+                      label="Excluded custom audiences"
+                      display={excludedCustomAudiences.length > 0
+                        ? excludedCustomAudiences.map(aud => aud.name || aud.id).join(", ")
+                        : undefined}
+                      lockedReason="Custom audience membership is managed in Meta Ads Manager, not here."
+                    >
+                      {excludedCustomAudiences.length > 0 && (
+                        <ReadOnlyChips
+                          label="Excluded custom audiences"
+                          values={excludedCustomAudiences.map(aud => aud.name || aud.id)}
+                        />
+                      )}
+                    </EditableField>
+
+                    <EditableField
+                      id="detailed-targeting-expansion"
+                      label="Detailed targeting & audience expansion"
+                      display={
+                        (draft.targeting?.targeting_optimization === "expansion_all" ? "Advantage detailed targeting on. " : "")
+                        + (detailedTargetingCount > 0
+                          ? `${detailedTargetingCount} interest or behaviour group${detailedTargetingCount === 1 ? "" : "s"} set in Meta.`
+                          : "No detailed targeting set.")
+                      }
+                    >
                       <SplitBlock title="Suggest an audience">
                         <label className="flex items-start gap-2 rounded border bg-muted/30 p-3">
                           <input
@@ -1458,12 +1631,6 @@ export function UnifiedWorkspaceEditor({
                             </select>
                           </div>
                         </div>
-                        {customAudiences.length > 0 && (
-                          <ReadOnlyChips
-                            label="Custom audiences (include)"
-                            values={customAudiences.map(aud => aud.name || aud.id)}
-                          />
-                        )}
                         <p className="rounded-md border border-dashed bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                           {detailedTargetingCount > 0
                             ? `Detailed targeting: ${detailedTargetingCount} interest or behaviour group${detailedTargetingCount === 1 ? "" : "s"} set in Meta, shown read-only.`
@@ -1471,9 +1638,24 @@ export function UnifiedWorkspaceEditor({
                           {" "}The full picker is deferred to BL-39.
                         </p>
                       </SplitBlock>
+                    </EditableField>
 
-                    </div>
-                  </Section>
+                    <EditableField
+                      id="custom-audiences-include"
+                      label="Custom audiences (include)"
+                      display={customAudiences.length > 0
+                        ? customAudiences.map(aud => aud.name || aud.id).join(", ")
+                        : undefined}
+                      lockedReason="Custom audience membership is managed in Meta Ads Manager, not here."
+                    >
+                      {customAudiences.length > 0 && (
+                        <ReadOnlyChips
+                          label="Custom audiences (include)"
+                          values={customAudiences.map(aud => aud.name || aud.id)}
+                        />
+                      )}
+                    </EditableField>
+                  </EditableCard>
 
                   {showTransparency && (
                     <Section
@@ -1497,7 +1679,8 @@ export function UnifiedWorkspaceEditor({
                     </Section>
                   )}
 
-                  <Section title="Placements">
+                  <EditableCard<WorkspaceNode> title="Placements" readOnly snapshot={draft} onRestore={setDraft}>
+                  <EditableCardBlock>
                     <div className="space-y-3">
                       <label className="flex cursor-pointer items-start gap-3 rounded-lg border p-3">
                         <input
@@ -1592,7 +1775,8 @@ export function UnifiedWorkspaceEditor({
                         <ReadOnlyChips label="Positions set in Meta" values={positionSummary} />
                       )}
                     </div>
-                  </Section>
+                  </EditableCardBlock>
+                  </EditableCard>
                 </>
               )}
 
@@ -1785,6 +1969,43 @@ export function UnifiedWorkspaceEditor({
                       </div>
                     </div>
                   </Section>
+
+                  <EditableCard<WorkspaceNode>
+                    title="Creative options"
+                    readOnly
+                    snapshot={draft}
+                    onRestore={setDraft}
+                  >
+                    <EditableField
+                      id="text-variations"
+                      label="Multiple Text Options"
+                      display={`${(draft.primary_text_variations || []).length + (draft.headline_variations || []).length + (draft.description_variations || []).length} variation${(draft.primary_text_variations || []).length + (draft.headline_variations || []).length + (draft.description_variations || []).length === 1 ? "" : "s"}`}
+                    >
+                      <div className="mt-2">
+                        <VariationFields draft={draft} updateCreative={updateCreative} />
+                      </div>
+                    </EditableField>
+                    <EditableField
+                      id="url-parameters"
+                      label="URL parameters"
+                      display={draft.url_parameters || "Not set"}
+                    >
+                      <Input
+                        className="mt-2"
+                        value={draft.url_parameters || ""}
+                        placeholder="utm_source=facebook&utm_medium=paid"
+                        onChange={event => updateCreative({ url_parameters: event.target.value })}
+                      />
+                    </EditableField>
+                    <EditableField
+                      id="one-ad-per-adset"
+                      label="One ad per ad set"
+                      display={draft.one_ad_per_adset ? "Yes" : "No"}
+                      lockedReason="This duplicates an ad set per selected media item. Use Classic Create for that structural action."
+                    >
+                      <input type="checkbox" checked={Boolean(draft.one_ad_per_adset)} readOnly />
+                    </EditableField>
+                  </EditableCard>
                 </>
               )}
             </fieldset>
@@ -1833,27 +2054,6 @@ export function UnifiedWorkspaceEditor({
           <Button type="button" variant="outline" onClick={onClose}>
             Close
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={onDiscard}
-            disabled={!hasDraft || readOnly || publishing}
-            title="Clears the staged edit in this browser. Nothing on Meta changes."
-          >
-            Discard local edit
-          </Button>
-          {onDiscardOnMeta && (
-            <Button
-              type="button"
-              variant="outline"
-              onClick={onDiscardOnMeta}
-              disabled={readOnly || publishing || savingDraft || discardingOnMeta || metaDraftCount === 0}
-              className="border-red-200 text-red-700 hover:bg-red-50 hover:text-red-700 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/30"
-              title="Deletes on Meta the PAUSED objects Save Draft created in this session. Objects that existed before are never touched."
-            >
-              {discardingOnMeta ? "Deleting…" : `Delete ${metaDraftCount} draft${metaDraftCount === 1 ? "" : "s"} on Meta`}
-            </Button>
-          )}
           {onSaveDraft && (
             <Button
               type="button"

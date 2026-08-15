@@ -12,7 +12,9 @@
 
 import { isBidStrategy } from "@/lib/create-campaign-bidding"
 import type { BidStrategy } from "@/lib/create-campaign-bidding"
+import { buildDeliveryFields } from "@/lib/odax-matrix"
 import type { CampaignObjective } from "@/lib/odax-matrix"
+import { buildTargeting } from "@/lib/create-campaign-targeting"
 import type { CampaignFormState, SpecialAdCategory } from "@/components/ads-manager/create-flow/types"
 import type { WorkspaceNode } from "@/components/ads-manager/UnifiedWorkspaceEditor"
 
@@ -202,6 +204,77 @@ export function applyCampaignShellEdit(
   }
 }
 
+// ---------------------------------------------------------------------------- entry hierarchy
+
+export type EntryHierarchyDrafts = {
+  adSet: WorkspaceNode
+  ad: WorkspaceNode
+  /**
+   * "" when the ad set can go to Meta straight from the gate; otherwise the user-facing reason it
+   * cannot yet (`buildDeliveryFields`). The ad is never materializable at gate time — Meta needs a
+   * Page, a creative, headline, body and a link, none of which the gate collects.
+   */
+  adSetBlockedReason: string
+}
+
+/**
+ * The two child drafts the editor opens on after `create-campaign-shell` returns.
+ *
+ * Field placement follows `FIELD_OWNER`: only `"adset"` fields reach the ad set node and only
+ * `"ad"` fields reach the ad node. What the gate cannot know is left unset rather than defaulted —
+ * a guessed pixel or Page is a silent spend decision.
+ */
+export function buildEntryHierarchyDrafts(
+  state: CampaignFormState,
+  campaignId: string,
+  ids: { adSetNodeId: string; adNodeId: string },
+): EntryHierarchyDrafts {
+  const delivery = buildDeliveryFields({
+    objective: state.objective,
+    conversionLocation: state.conversionLocation,
+    engagementType: state.engagementType,
+    performanceGoal: state.performanceGoal,
+    pixelId: state.pixelId || undefined,
+    conversionEvent: state.conversionEvent || undefined,
+    pageId: state.pageId || undefined,
+    hasCostCap: Boolean(state.costPerResultGoal.trim()),
+  })
+  const resolved = typeof delivery === "string" ? null : delivery
+
+  const adSet: WorkspaceNode = {
+    id: ids.adSetNodeId,
+    name: state.adSetName.trim() || "New ad set",
+    status: "PAUSED",
+    campaign_id: campaignId,
+    targeting: buildTargeting(state),
+    // CBO puts the budget on the campaign; sending one here is what Meta rejects.
+    daily_budget: state.advantageCampaignBudget ? undefined : toMinorUnits(state.dailyBudget),
+    optimization_goal: resolved?.optimizationGoal,
+    billing_event: resolved?.billingEvent,
+    destination_type: resolved?.destinationType,
+    promoted_object: resolved?.promotedObject,
+  }
+
+  const ad: WorkspaceNode = {
+    id: ids.adNodeId,
+    name: state.adName.trim() || "New ad",
+    status: "PAUSED",
+    adset_id: ids.adSetNodeId,
+    campaign_id: campaignId,
+    page_id: state.pageId || undefined,
+    primaryText: state.primaryText || undefined,
+    headline: state.headline || undefined,
+    link: state.destinationUrl || undefined,
+    cta: state.callToAction,
+  }
+
+  return {
+    adSet,
+    ad,
+    adSetBlockedReason: typeof delivery === "string" ? delivery : "",
+  }
+}
+
 export type MaterializeNode = {
   nodeId: string
   level: DraftLevel
@@ -238,6 +311,7 @@ export type MaterializeNode = {
   primaryTextVariations?: string[]
   headlineVariations?: string[]
   descriptionVariations?: string[]
+  urlParameters?: string
   creativeId?: string
   creativeThumb?: string
 }
@@ -279,6 +353,7 @@ function materializeNode(node: WorkspaceNode, level: DraftLevel): MaterializeNod
     primaryTextVariations: node.primary_text_variations,
     headlineVariations: node.headline_variations,
     descriptionVariations: node.description_variations,
+    urlParameters: node.url_parameters,
     creativeId: node.portal_creative_id,
     creativeThumb: node.thumb_url || creative?.thumbnail_url,
   }

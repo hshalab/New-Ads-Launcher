@@ -34,19 +34,19 @@ const FieldEditContext = createContext<FieldEditContextValue>({
   cancel: () => {},
 })
 
-export interface EditableCardProps {
+export interface EditableCardProps<T = CampaignFormState> {
   title: string
   /** Rendered at the top-right of the card header — badges, counters. */
   headerRight?: React.ReactNode
   subtitle?: React.ReactNode
   readOnly?: boolean
   /** Current form state, snapshotted when a row opens so Cancel can restore it. */
-  snapshot?: CampaignFormState
-  onRestore?: (snapshot: CampaignFormState) => void
+  snapshot?: T
+  onRestore?: (snapshot: T) => void
   children: React.ReactNode
 }
 
-export function EditableCard({
+export function EditableCard<T = CampaignFormState>({
   title,
   headerRight,
   subtitle,
@@ -54,9 +54,9 @@ export function EditableCard({
   snapshot,
   onRestore,
   children,
-}: EditableCardProps) {
+}: EditableCardProps<T>) {
   const [activeField, setActiveField] = useState<string | null>(null)
-  const [restorePoint, setRestorePoint] = useState<CampaignFormState | null>(null)
+  const [restorePoint, setRestorePoint] = useState<T | null>(null)
 
   // One row per card is editable at a time; opening another commits the previous one.
   const open = useCallback(

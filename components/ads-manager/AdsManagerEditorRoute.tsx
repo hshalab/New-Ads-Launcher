@@ -57,7 +57,7 @@ function readParams(search: URLSearchParams, fallbackAccount: string): Params | 
 export function AdsManagerEditorRoute({ intercepted = false }: { intercepted?: boolean }) {
   const router = useRouter()
   const search = useSearchParams()
-  const { selectedAccountId } = useAdAccount()
+  const { selectedAccountId, selectedAccount } = useAdAccount()
 
   const params = useMemo(
     () => readParams(new URLSearchParams(search.toString()), selectedAccountId || ""),
@@ -172,6 +172,7 @@ export function AdsManagerEditorRoute({ intercepted = false }: { intercepted?: b
         mode="charts"
         level={params.level}
         accountId={params.accountId}
+        timezoneName={selectedAccount?.id === params.accountId ? selectedAccount.timezone_name : undefined}
         rows={rows}
         datePreset={params.datePreset}
         since=""

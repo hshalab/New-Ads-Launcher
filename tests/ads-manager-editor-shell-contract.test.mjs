@@ -175,6 +175,98 @@ describe("Ads Manager editor shell + MECE contract (BL-39 B8)", () => {
     assert.match(editor, /element\.scrollHeight - element\.clientHeight > 1/)
     assert.match(editor, /expanded \? "See less" : "See more"/)
   })
+
+  it("keeps required rows open and moves secondary options behind pencils", () => {
+    assert.match(editor, /import \{ EditableCard, EditableCardBlock, EditableField \}/)
+    assert.match(editor, /title="Campaign structure"/)
+    assert.match(editor, /id="special-ad-categories"/)
+    assert.match(editor, /id="attribution-setting"/)
+    assert.match(editor, /id="text-variations"/)
+    assert.match(editor, /id="url-parameters"/)
+    assert.match(editor, /id="one-ad-per-adset"/)
+  })
+
+  it("wires Editor MTO and URL parameters without Dynamic Creative", () => {
+    assert.match(editor, /<VariationFields draft=\{draft\} updateCreative=\{updateCreative\}/)
+    assert.match(editor, /url_parameters: event\.target\.value/)
+    const publish = read("app/api/ads-manager/workspace-publish/route.ts")
+    assert.match(publish, /omit_degrees_of_freedom_spec: true/)
+    assert.match(publish, /url_tags: change\.node\.url_parameters/)
+    assert.match(publish, /special_ad_categories: change\.level === "campaign" \? change\.node\.special_ad_categories : undefined/)
+  })
+
+  it("keeps Special Ad Categories always visible, not pencil-collapsed", () => {
+    // Compliance-weighted: hiding it behind a pencil was the bug — it must render every time the
+    // Campaign structure card is open, read-only or not.
+    const specialAdCategoriesBlock = editor.slice(
+      editor.indexOf('id="special-ad-categories"'),
+      editor.indexOf('id="special-ad-categories"') + 200
+    )
+    assert.match(specialAdCategoriesBlock, /always/)
+  })
+
+  it("edits schedule_time_basis at the ad set as a pencil field, converts to UTC before it reaches Meta", () => {
+    // The basis is a display preference only — Meta never sees it. Both wire fields stay pure UTC
+    // ISO regardless of which basis produced them, so publish needs no new transform.
+    assert.match(editor, /id="schedule-time-basis"/)
+    assert.match(editor, /draft\.schedule_time_basis === "utc" \? "UTC" : `Ad account time/)
+    assert.match(editor, /value=\{draft\.schedule_time_basis \|\| "account"\}/)
+    assert.match(editor, /onChange=\{event => setDraft\(\{ \.\.\.draft, schedule_time_basis: event\.target\.value as "account" \| "utc" \}\)\}/)
+    assert.match(editor, /function scheduleToUtc\(value: string, basis: "account" \| "utc", timezoneName\?: string\)/)
+    assert.match(editor, /wallClockToUtcIso\(value, timezoneName\)/)
+    // No new payload field — updateNode/materialize keep taking start_time/end_time as UTC ISO.
+    const publish = read("app/api/ads-manager/workspace-publish/route.ts")
+    assert.doesNotMatch(publish, /schedule_time_basis/)
+    // timezoneName reaches the editor from both PerformancePopup mount points.
+    const popup = read("components/ads-manager/PerformancePopup.tsx")
+    assert.match(popup, /timezoneName\?: string/)
+    assert.match(popup, /timezoneName=\{timezoneName\}/)
+    const table = read("app/(dashboard)/ads-manager/page.tsx")
+    assert.match(table, /timezoneName=\{selectedAccount\?\.timezone_name\}/)
+    const route = read("components/ads-manager/AdsManagerEditorRoute.tsx")
+    assert.match(route, /timezoneName=\{selectedAccount/)
+  })
+
+  it("wraps Audience secondary rows behind pencils, keeps Placements as one always-visible block", () => {
+    // Detailed targeting/expansion and custom/excluded audiences are single-value read-only
+    // summaries — they get individual EditableField rows. Placements is a radio-driven checkbox
+    // grid with no single value to summarize, so it stays one EditableCardBlock instead of being
+    // forced into fields it doesn't fit.
+    assert.match(editor, /<EditableCard<WorkspaceNode>\s*\n?\s*title="Audience"/)
+    assert.match(editor, /id="audience-locations"/)
+    assert.match(editor, /id="audience-min-age"/)
+    assert.match(editor, /id="detailed-targeting-expansion"/)
+    assert.match(editor, /id="custom-audiences-include"/)
+    assert.match(editor, /id="excluded-custom-audiences"/)
+    assert.match(editor, /lockedReason="Custom audience membership is managed in Meta Ads Manager, not here\."/)
+    assert.match(editor, /<EditableCard<WorkspaceNode> title="Placements" readOnly snapshot=\{draft\} onRestore=\{setDraft\}>/)
+    assert.match(editor, /<EditableCardBlock>[\s\S]*placementMode[\s\S]*<\/EditableCardBlock>/)
+    // Always-visible fields the coordinator named must survive the pass unchanged.
+    assert.match(editor, /<LocationsField/)
+    assert.match(editor, /Minimum age \(control\)/)
+  })
+
+  it("packages ad-set locations behind a pencil, not always-visible", () => {
+    // Owner correction: locations moved from the always block into its own pencil row. A buyer
+    // must be able to confirm geo targeting from the collapsed summary alone.
+    const locationsFieldBlock = editor.slice(
+      editor.indexOf('id="audience-locations"'),
+      editor.indexOf('id="audience-locations"') + 400
+    )
+    assert.doesNotMatch(locationsFieldBlock, /\balways\b/)
+    assert.match(locationsFieldBlock, /display=\{locationsSummary\(/)
+    assert.match(editor, /function locationsSummary\(geo\?: GeoLocations, excluded\?: GeoLocations\)/)
+    // Age/gender stays always-visible — only locations collapsed in this change.
+    const minAgeBlock = editor.slice(
+      editor.indexOf('id="audience-min-age"'),
+      editor.indexOf('id="audience-min-age"') + 100
+    )
+    assert.match(minAgeBlock, /\balways\b/)
+    // Collapse must not change what reaches Meta: geo/excluded still spread the whole object and
+    // still let excluded_geo_locations go absent (not empty) to remove every exclusion.
+    assert.match(editor, /geo_locations: geo,/)
+    assert.match(editor, /excluded_geo_locations: excluded,/)
+  })
 })
 
 describe("Ads Manager editor shell modes (page + collapse view)", () => {
@@ -221,5 +313,20 @@ describe("Ads Manager editor shell modes (page + collapse view)", () => {
     // Close returns to the table without stacking history when we soft-navigated in.
     assert.match(route, /router\.back\(\)/)
     assert.match(route, /router\.push\("\/ads-manager"\)/)
+  })
+})
+
+describe("Feedback entry point stays available on the Editor route", () => {
+  const bubble = read("components/feedback-bubble.tsx")
+
+  it("does not suppress the trigger on /ads-manager/editor", () => {
+    // The Editor is the surface used most — removing the entry point there was an overcorrection
+    // of the original overlap bug. Fix is a route-scoped reposition, not a route-scoped bail-out.
+    assert.doesNotMatch(bubble, /if \(pathname\?\.startsWith\("\/ads-manager\/editor"\)\) return null/)
+  })
+
+  it("shifts clear of the Editor footer (Close/Save Draft/Publish) instead of overlapping it", () => {
+    assert.match(bubble, /const isEditorRoute = pathname\?\.startsWith\("\/ads-manager\/editor"\)/)
+    assert.match(bubble, /isEditorRoute \? "bottom-28" : "bottom-6"/)
   })
 })

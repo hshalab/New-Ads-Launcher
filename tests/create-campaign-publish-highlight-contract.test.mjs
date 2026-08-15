@@ -42,7 +42,8 @@ describe("Create Campaign publish highlight contract", () => {
 
   it("holds the published ids in the table and clears them on a timer", () => {
     assert.match(table, /const \[justPublishedIds, setJustPublishedIds\] = useState<Set<string>>/)
-    assert.match(table, /const ids = \[result\.campaignId, \.\.\.result\.adSetIds\]/)
+    // BL-64 slice 4 widened the highlight a third time: created ads join campaign + ad set ids.
+    assert.match(table, /const ids = \[result\.campaignId, \.\.\.result\.adSetIds, \.\.\.result\.adIds\]/)
     // Clock starts after the refetch, otherwise it expires while the rows are still loading.
     assert.match(table, /await fetchMainData\(true\)\s*\n\s*justPublishedTimer\.current = setTimeout/)
     assert.match(table, /clearTimeout\(justPublishedTimer\.current\)/)
@@ -50,9 +51,17 @@ describe("Create Campaign publish highlight contract", () => {
 
   it("tints the row and badges it in all three tabs", () => {
     assert.match(table, /function rowTint\(isNew: boolean, hasDraft: boolean\)/)
+    /**
+     * BL-64 slice 4 widened this highlight to a second claim — a row the editor create path made on
+     * Meta but has not published. The BL-58 invariant is unchanged and still asserted: three
+     * renderers, one tint and one badge each, and `justPublishedIds` is what produces the words
+     * "Just published". Only the expression feeding them moved behind `newRowLabel`.
+     */
+    assert.match(table, /justPublishedIds\.has\(id\) \? "Just published"/)
     // Campaigns, ad sets, ads — one call per renderer.
-    assert.equal((table.match(/rowTint\(justPublishedIds\.has\(/g) || []).length, 3)
-    assert.equal((table.match(/>Just published<\/span>/g) || []).length, 3)
+    assert.equal((table.match(/rowTint\(Boolean\(newRowLabel\(/g) || []).length, 3)
+    assert.equal((table.match(/<NewRowBadge label=\{newRowLabel\(/g) || []).length, 3)
+    assert.match(table, /function NewRowBadge\(\{ label \}: \{ label: string \| null \}\)/)
     // Just-published outranks the unpublished-draft tint; selection still outranks both.
     assert.match(table, /if \(isNew\) return \{[\s\S]*?tinted: true/)
     assert.match(table, /tinted && !isSel && tintRow/)

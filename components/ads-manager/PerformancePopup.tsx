@@ -37,6 +37,7 @@ import {
   setBatchId,
   type SessionCreatedLedger,
 } from "@/lib/session-created-ledger"
+import { takeWorkspaceEntryHandoff } from "@/lib/workspace-entry-handoff"
 
 type Tab = "trends" | "breakdowns"
 
@@ -317,7 +318,7 @@ function NodeActionMenu({ level, id, onDuplicate, onDelete, onEdit, onViewHistor
 }
 
 export function PerformancePopup({
-  mode, level, accountId, rows, datePreset, since, until, onClose,
+  mode, level, accountId, timezoneName, rows, datePreset, since, until, onClose,
   campaigns, adSets, ads, onDuplicate, onDelete, onEdit, onViewHistory,
   attributionWindows, initialView = "charts", onSaveEdit, onCreate,
   onCreateReplacement, unifiedWorkspace = false, canMutate = false, onPublished,
@@ -326,6 +327,9 @@ export function PerformancePopup({
   mode: "charts" | "compare"
   level: Level
   accountId: string
+  /** Ad account's Meta timezone name, e.g. "America/Los_Angeles". Drives the Editor's Schedule
+   * options basis display — absent on callers that have not loaded account info yet. */
+  timezoneName?: string
   rows: ReportRow[]
   datePreset: string
   since: string
@@ -462,6 +466,18 @@ export function PerformancePopup({
   const [sessionLedger, setSessionLedger] = useState<SessionCreatedLedger>(createSessionCreatedLedger)
   const [discardingOnMeta, setDiscardingOnMeta] = useState(false)
   const metaDraftCount = pendingDeletes(sessionLedger).length
+  /**
+   * Nodes this session created, under either identity they can be known by (the `local:` id it was
+   * staged with, and the Meta id it was remapped to). Anchors are excluded — they existed before.
+   */
+  const sessionCreatedIds = useMemo(
+    () => new Set(
+      sessionLedger.nodes
+        .filter(node => !node.anchor)
+        .flatMap(node => [node.nodeId, node.metaId].filter((id): id is string => Boolean(id)))
+    ),
+    [sessionLedger]
+  )
   const [workspaceDiscardConfirm, setWorkspaceDiscardConfirm] = useState(false)
   const workspaceDirty = Object.keys(workspaceDrafts).length > 0
   const historyRef = useRef<HTMLDivElement>(null)
@@ -516,6 +532,26 @@ export function PerformancePopup({
     setLocalAdSets([])
     setLocalAds([])
   }, [rows.map(r => r.id).join(","), level]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── BL-64 slice 4 · gate → editor handoff ──────────────────────────────────
+  // The create path built a campaign on Meta plus staged children before navigating here. This
+  // effect must run *after* the reset above, or the reset would wipe what it just seeded.
+  // Consumed once: re-seeding on refresh would let Discard target already-deleted objects.
+  const entryHandoffCampaignId = level === "campaign" ? rows[0]?.id || "" : ""
+  useEffect(() => {
+    if (!unifiedWorkspace || !accountId) return
+    const handoff = takeWorkspaceEntryHandoff(accountId, entryHandoffCampaignId)
+    if (!handoff) return
+    setLocalCampaigns(current => [...current, ...handoff.localCampaigns])
+    setLocalAdSets(current => [...current, ...handoff.localAdSets])
+    setLocalAds(current => [...current, ...handoff.localAds])
+    setWorkspaceDrafts(current => ({ ...current, ...handoff.drafts }))
+    setSessionLedger(handoff.ledger)
+    if (handoff.batchId) setWorkspaceBatchId(handoff.batchId)
+    // A child that never reached Meta is stated, never swallowed — the buyer is otherwise looking
+    // at an editor tree with a node that exists only in this tab.
+    if (handoff.error) setWorkspaceMaterializeError(handoff.error)
+  }, [unifiedWorkspace, accountId, entryHandoffCampaignId])
 
   // Resolve display name for the selected node from the merged hierarchy
   const activeNodeName = useMemo(() => {
@@ -1715,10 +1751,16 @@ export function PerformancePopup({
                     <button onClick={() => activeId && seeHistoryLocal(activeId, String(activeNodeLevel))} className={cn("h-7 px-2 text-xs rounded-md border hover:bg-muted/50", chartsPage === "history" && "bg-primary/10 text-primary border-primary/30")}>See history</button>
                   </div>
                 )}
+                {workspaceMaterializeError && (
+                  <p className="mb-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] leading-snug text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+                    {workspaceMaterializeError}
+                  </p>
+                )}
                 <div className="space-y-1 text-xs">
                   {activeCampaign && (() => {
                     const draftKey = `campaign:${activeCampaign.id}`
                     const hasDraft = Boolean(workspaceDrafts[draftKey])
+                    const isNew = sessionCreatedIds.has(activeCampaign.id)
                     const draftName = workspaceDrafts[draftKey]?.name
                     return (
                       <div
@@ -1727,10 +1769,12 @@ export function PerformancePopup({
                           "flex items-center justify-between gap-2 rounded-md px-2 py-1.5 cursor-pointer text-blue-600 dark:text-blue-400 hover:bg-muted/40",
                           activeCampaign.id === activeId && "bg-primary/10 text-primary",
                           hasDraft && "bg-emerald-50 ring-1 ring-emerald-200 dark:bg-emerald-950/30 dark:ring-emerald-800",
+                          isNew && "bg-amber-50 ring-1 ring-amber-200 dark:bg-amber-950/30 dark:ring-amber-800",
                         )}
                       >
                         <div className="min-w-0 flex-1">
                           <span className="block truncate font-medium text-slate-900 dark:text-white">📁 {draftName || activeCampaign.name}</span>
+                          {isNew && <span className="mr-2 text-[10px] font-medium text-amber-700 dark:text-amber-400">New · paused</span>}
                           {hasDraft && <span className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400">Unpublished edits</span>}
                         </div>
                         <NodeActionMenu level="campaign" id={activeCampaign.id} onDuplicate={onDuplicate} onDelete={onDelete} onEdit={unifiedWorkspace ? (id) => openWorkspaceEditor(id, "campaign") : onEdit} onViewHistory={onViewHistory} onSeeHistory={seeHistoryLocal} />
@@ -1740,6 +1784,7 @@ export function PerformancePopup({
                   {treeAdSets.map(as => {
                     const draftKey = `adset:${as.id}`
                     const hasDraft = Boolean(workspaceDrafts[draftKey])
+                    const isNew = sessionCreatedIds.has(as.id)
                     const draftName = workspaceDrafts[draftKey]?.name
                     return (
                       <div key={as.id} className="ml-4">
@@ -1749,10 +1794,12 @@ export function PerformancePopup({
                             "flex items-center justify-between gap-2 rounded-md px-2 py-1.5 cursor-pointer text-blue-600 dark:text-blue-400 hover:bg-muted/40",
                             as.id === activeId && "bg-primary/10 text-primary",
                             hasDraft && "bg-emerald-50 ring-1 ring-emerald-200 dark:bg-emerald-950/30 dark:ring-emerald-800",
+                            isNew && "bg-amber-50 ring-1 ring-amber-200 dark:bg-amber-950/30 dark:ring-amber-800",
                           )}
                         >
                           <div className="min-w-0 flex-1">
                             <span className="block truncate text-slate-900 dark:text-white">▦ {draftName || as.name}</span>
+                            {isNew && <span className="mr-2 text-[10px] font-medium text-amber-700 dark:text-amber-400">New · paused</span>}
                             {hasDraft && <span className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400">Unpublished edits</span>}
                           </div>
                           <NodeActionMenu level="ad set" id={as.id} onDuplicate={onDuplicate} onDelete={onDelete} onEdit={unifiedWorkspace ? (id) => openWorkspaceEditor(id, "adset") : onEdit} onViewHistory={onViewHistory} onSeeHistory={seeHistoryLocal} />
@@ -1761,6 +1808,7 @@ export function PerformancePopup({
                           {treeAds(as.id).map(ad => {
                             const adDraftKey = `ad:${ad.id}`
                             const adHasDraft = Boolean(workspaceDrafts[adDraftKey])
+                            const adIsNew = sessionCreatedIds.has(ad.id)
                             const adDraftName = workspaceDrafts[adDraftKey]?.name
                             return (
                               <div
@@ -1770,10 +1818,12 @@ export function PerformancePopup({
                                   "flex items-center justify-between gap-2 rounded-md px-2 py-1.5 cursor-pointer text-blue-600 dark:text-blue-400 hover:bg-muted/40",
                                   ad.id === activeId && "bg-primary/10 text-primary",
                                   adHasDraft && "bg-emerald-50 ring-1 ring-emerald-200 dark:bg-emerald-950/30 dark:ring-emerald-800",
+                                  adIsNew && "bg-amber-50 ring-1 ring-amber-200 dark:bg-amber-950/30 dark:ring-amber-800",
                                 )}
                               >
                                 <div className="min-w-0 flex-1">
                                   <span className="block truncate text-slate-900 dark:text-white">▣ {adDraftName || ad.name}</span>
+                                  {adIsNew && <span className="mr-2 text-[10px] font-medium text-amber-700 dark:text-amber-400">New · paused</span>}
                                   {adHasDraft && <span className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400">Unpublished edits</span>}
                                 </div>
                                 <NodeActionMenu level="ad" id={ad.id} onDuplicate={onDuplicate} onDelete={onDelete} onEdit={unifiedWorkspace ? (id) => openWorkspaceEditor(id, "ad") : onEdit} onViewHistory={onViewHistory} onSeeHistory={seeHistoryLocal} />
@@ -1811,6 +1861,7 @@ export function PerformancePopup({
                 onRefresh={() => setWorkspaceDetailRefresh(value => value + 1)}
                 onDraftChange={updateWorkspaceDraft}
                 accountId={accountId}
+                timezoneName={timezoneName}
                 // TD-42: the ad set node carries no objective, so the editor cannot resolve its
                 // ODAX row without the parent campaign's.
                 campaignObjective={activeCampaign?.objective}
@@ -1833,9 +1884,6 @@ export function PerformancePopup({
                   : undefined}
                 onSaveDraft={() => { void saveWorkspaceDraft() }}
                 savingDraft={savingWorkspaceDraft}
-                onDiscardOnMeta={() => { void discardWorkspaceOnMeta() }}
-                metaDraftCount={metaDraftCount}
-                discardingOnMeta={discardingOnMeta}
                 publishing={workspacePublishing}
                 draftCount={Object.keys(workspaceDrafts).length}
                 onTogglePanel={unifiedWorkspace ? () => setSidebarOpen(open => !open) : undefined}

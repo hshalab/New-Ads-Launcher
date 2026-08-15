@@ -73,4 +73,15 @@ describe("workspace materialize contract", () => {
     assert.match(route, /success: !auditError && results\.every/)
     assert.match(route, /invalidateMetaReadCacheAfterWrite/)
   })
+
+  it("writes special categories for new and existing campaigns", () => {
+    assert.match(route, /special_ad_categories: node\.specialAdCategories/)
+    assert.match(route, /special_ad_categories: node\.level === "campaign" \? node\.specialAdCategories : undefined/)
+  })
+
+  it("keeps MTO on a standard ad set and forwards URL parameters", () => {
+    assert.match(route, /text_variations: \{[\s\S]*primaryTextVariations/)
+    assert.match(route, /omit_degrees_of_freedom_spec: true/)
+    assert.match(route, /url_tags: node\.urlParameters/)
+  })
 })

@@ -20,6 +20,7 @@ type WorkspaceChange = {
     id: string
     name?: string
     status?: string
+    special_ad_categories?: string[]
     campaign_id?: string
     adset_id?: string
     daily_budget?: string
@@ -52,6 +53,7 @@ type WorkspaceChange = {
     primary_text_variations?: string[]
     headline_variations?: string[]
     description_variations?: string[]
+    url_parameters?: string
   }
 }
 
@@ -197,6 +199,8 @@ export async function POST(request: NextRequest) {
               titles: change.node.headline_variations || [],
               descriptions: change.node.description_variations || [],
             },
+            omit_degrees_of_freedom_spec: true,
+            url_tags: change.node.url_parameters,
           }, { isManual: isManual(connection) })
           results.push({ id: change.node.id, level: change.level, status: "published" })
           continue
@@ -220,6 +224,7 @@ export async function POST(request: NextRequest) {
         await updateNode(change.node.id, connection.access_token, {
           name: change.node.name,
           status: change.node.status,
+          special_ad_categories: change.level === "campaign" ? change.node.special_ad_categories : undefined,
           daily_budget: moneyFromMinor(change.node.daily_budget),
           lifetime_budget: moneyFromMinor(change.node.lifetime_budget),
           start_time: change.node.start_time,

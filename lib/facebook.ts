@@ -1608,6 +1608,8 @@ export async function createAd(
       titles: string[]       // all headline versions (first = default)
       descriptions: string[] // all description versions
     }
+    omit_degrees_of_freedom_spec?: boolean
+    url_tags?: string
     // Ad Source modes
     sitelinks?: Array<{ title: string; url: string }>
     object_story_id?: string   // Post ID mode: reuse existing dark post (carries social proof)
@@ -1743,26 +1745,28 @@ export async function createAd(
   if (tvHasMultiple && tvConflict) {
     console.warn("[createAd] text_variations ignored — a conflicting ad format (multilanguage/catalog/multi-placement/flexible/carousel) owns asset_feed_spec for this ad")
   }
-  if (usesTextVariations) {
-    // Explicitly OPT_OUT of all Advantage+ creative enhancements when using MTO.
-    // standard_enhancements is deprecated; Meta now validates creative_features_spec keys against a fixed enum
-    // (confirmed via API error #100): IG_VIDEO_NATIVE_SUBTITLE, IMAGE_ANIMATION, PRODUCT_BROWSING,
-    // PRODUCT_METADATA_AUTOMATION, PROFILE_CARD, STANDARD_ENHANCEMENTS_CATALOG, TEXT_OVERLAY_TRANSLATION.
-    // STANDARD_ENHANCEMENTS_CATALOG is the umbrella replacement for the old standard_enhancements field.
-    const validFeatureKeys = [
-      "IG_VIDEO_NATIVE_SUBTITLE", "IMAGE_ANIMATION", "PRODUCT_BROWSING",
-      "PRODUCT_METADATA_AUTOMATION", "PROFILE_CARD", "STANDARD_ENHANCEMENTS_CATALOG",
-      "TEXT_OVERLAY_TRANSLATION",
-    ]
-    const features: Record<string, any> = {}
-    validFeatureKeys.forEach(key => {
-      features[key] = { enroll_status: "OPT_OUT" }
-    })
-    creativeJson.degrees_of_freedom_spec = {
-      creative_features_spec: features
+  if (!params.omit_degrees_of_freedom_spec) {
+    if (usesTextVariations) {
+      // Explicitly OPT_OUT of all Advantage+ creative enhancements when using MTO.
+      // standard_enhancements is deprecated; Meta now validates creative_features_spec keys against a fixed enum
+      // (confirmed via API error #100): IG_VIDEO_NATIVE_SUBTITLE, IMAGE_ANIMATION, PRODUCT_BROWSING,
+      // PRODUCT_METADATA_AUTOMATION, PROFILE_CARD, STANDARD_ENHANCEMENTS_CATALOG, TEXT_OVERLAY_TRANSLATION.
+      // STANDARD_ENHANCEMENTS_CATALOG is the umbrella replacement for the old standard_enhancements field.
+      const validFeatureKeys = [
+        "IG_VIDEO_NATIVE_SUBTITLE", "IMAGE_ANIMATION", "PRODUCT_BROWSING",
+        "PRODUCT_METADATA_AUTOMATION", "PROFILE_CARD", "STANDARD_ENHANCEMENTS_CATALOG",
+        "TEXT_OVERLAY_TRANSLATION",
+      ]
+      const features: Record<string, any> = {}
+      validFeatureKeys.forEach(key => {
+        features[key] = { enroll_status: "OPT_OUT" }
+      })
+      creativeJson.degrees_of_freedom_spec = {
+        creative_features_spec: features
+      }
+    } else if (params.degrees_of_freedom_spec) {
+      creativeJson.degrees_of_freedom_spec = params.degrees_of_freedom_spec
     }
-  } else if (params.degrees_of_freedom_spec) {
-    creativeJson.degrees_of_freedom_spec = params.degrees_of_freedom_spec
   }
   // Multi Placement Ads — asset_feed_spec with placement-aware customization rules
   // Meta auto-picks best aspect for each placement; if customRules provided (manual mode),
@@ -1965,6 +1969,7 @@ export async function createAd(
     status: params.status || "PAUSED",
     access_token: accessToken,
   })
+  if (params.url_tags?.trim()) body.set("url_tags", params.url_tags.trim())
   const normId = adAccountId.startsWith("act_") ? adAccountId : `act_${adAccountId}`
   console.log(`[createAd] POST /${normId}/ads with creative spec:`, JSON.stringify(creativeJson, null, 2))
   const res = await secureMetaFetch(`${GRAPH_API_BASE}/${normId}/ads`, { method: "POST", body }, { skipProof: opts?.isManual })
@@ -2530,6 +2535,8 @@ export async function replaceAdCreative(
       titles: string[]
       descriptions: string[]
     }
+    omit_degrees_of_freedom_spec?: boolean
+    url_tags?: string
   },
   opts?: { isManual?: boolean }
 ): Promise<{ creativeId: string }> {
@@ -2556,7 +2563,10 @@ export async function replaceAdCreative(
     delete storySpec.link_data
   }
 
-  const creative: Record<string, any> = { object_story_spec: storySpec }
+  const creative: Record<string, any> = {
+    object_story_spec: storySpec,
+    ...(params.url_tags?.trim() ? { url_tags: params.url_tags.trim() } : {}),
+  }
   const variations = params.text_variations
   const bodies = Array.from(new Set([params.body, ...(variations?.bodies || [])].map(value => value.trim()).filter(Boolean))).slice(0, 5)
   const titles = Array.from(new Set([params.title, ...(variations?.titles || [])].map(value => value.trim()).filter(Boolean))).slice(0, 5)
@@ -2573,10 +2583,12 @@ export async function replaceAdCreative(
         ? { videos: [{ video_id: params.video_id, ...(params.thumbnail_url ? { thumbnail_url: params.thumbnail_url } : {}) }] }
         : { images: [{ hash: params.image_hash }] }),
     }
-    creative.degrees_of_freedom_spec = {
-      creative_features_spec: {
-        STANDARD_ENHANCEMENTS_CATALOG: { enroll_status: "OPT_OUT" },
-      },
+    if (!params.omit_degrees_of_freedom_spec) {
+      creative.degrees_of_freedom_spec = {
+        creative_features_spec: {
+          STANDARD_ENHANCEMENTS_CATALOG: { enroll_status: "OPT_OUT" },
+        },
+      }
     }
     delete storySpec.link_data
     delete storySpec.video_data
@@ -2694,6 +2706,7 @@ export async function updateNode(
   params: {
     name?: string
     status?: string
+    special_ad_categories?: string[]
     daily_budget?: number
     lifetime_budget?: number
     start_time?: string
@@ -2721,6 +2734,7 @@ export async function updateNode(
   const body = new URLSearchParams({ access_token: accessToken })
   if (params.name) body.set("name", params.name)
   if (params.status) body.set("status", params.status)
+  if (params.special_ad_categories !== undefined) body.set("special_ad_categories", JSON.stringify(params.special_ad_categories))
   if (params.daily_budget !== undefined) body.set("daily_budget", String(Math.round(params.daily_budget * 100)))
   if (params.lifetime_budget !== undefined) body.set("lifetime_budget", String(Math.round(params.lifetime_budget * 100)))
   if (params.start_time) body.set("start_time", params.start_time)

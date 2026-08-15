@@ -152,6 +152,11 @@ export function FeedbackBubble() {
 
   const functions = functionsForArea(area)
 
+  // The workspace editor footer (Close/Save Draft/Publish, bottom-right, ~90px tall) sits under
+  // this same corner. Shift up clear of it rather than suppressing the entry point — the editor
+  // is the surface used most, so it is the surface where feedback matters most.
+  const isEditorRoute = pathname?.startsWith("/ads-manager/editor")
+
   return (
     <Popover
       modal={false}
@@ -169,7 +174,12 @@ export function FeedbackBubble() {
       <PopoverTrigger asChild>
         <button
           aria-label="Send feedback"
-          className="fixed bottom-6 right-6 z-50 size-12 rounded-full bg-primary text-primary-foreground shadow-lg ring-1 ring-primary/30 flex items-center justify-center hover:bg-primary/90 transition-all"
+          className={cn(
+            "fixed right-6 z-50 size-12 rounded-full bg-primary text-primary-foreground shadow-lg ring-1 ring-primary/30 flex items-center justify-center hover:bg-primary/90 transition-all",
+            // Editor footer (Close/Save Draft/Publish) occupies bottom-right up to ~90px tall —
+            // clear it instead of overlapping it.
+            isEditorRoute ? "bottom-28" : "bottom-6"
+          )}
         >
           <IconMessage className="size-5" />
         </button>

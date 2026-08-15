@@ -37,6 +37,23 @@ import type {
   PerformanceGoal,
   SpecialAdCategory,
 } from "@/components/ads-manager/create-flow/types"
+import { defaultCampaignState } from "@/components/ads-manager/create-flow/types"
+import type { EntryGateResult, SetupMode } from "@/components/ads-manager/create-flow/CreateEntryGate"
+import { normalizeOdaxSelection } from "@/lib/odax-matrix"
+import {
+  buildEntryHierarchyDrafts,
+  formStateToCampaignShell,
+  workspaceDraftsToMaterializeNodes,
+} from "@/lib/workspace-draft-adapter"
+import {
+  anchorExistingNode,
+  appendCreatedNode,
+  createSessionCreatedLedger,
+  remapCreatedNode,
+  setBatchId,
+  type SessionCreatedLedger,
+} from "@/lib/session-created-ledger"
+import { saveWorkspaceEntryHandoff } from "@/lib/workspace-entry-handoff"
 import {
   duplicateAdSetsIntoCampaigns,
   duplicateCampaignCopies,
@@ -45,6 +62,7 @@ import {
 
 // Modals only render when opened — load their JS on demand instead of in the main bundle
 const PerformancePopup = dynamic(() => import("@/components/ads-manager/PerformancePopup").then(m => m.PerformancePopup), { ssr: false })
+const CreateEntryGate = dynamic(() => import("@/components/ads-manager/create-flow/CreateEntryGate").then(m => m.CreateEntryGate), { ssr: false })
 const CreateCampaignModal = dynamic(() => import("@/components/ads-manager/create-flow/CreateCampaignModal").then(m => m.CreateCampaignModal), { ssr: false })
 const CustomizeColumnsModal = dynamic(() => import("@/components/ads-manager/CustomizeColumnsModal").then(m => m.CustomizeColumnsModal), { ssr: false })
 const EditAdSetDrawer = dynamic(() => import("@/components/ads-manager/EditAdSetDrawer").then(m => m.EditAdSetDrawer), { ssr: false })
@@ -1039,6 +1057,19 @@ function rowTint(isNew: boolean, hasDraft: boolean) {
     tintHover: "group-hover/row:bg-emerald-50 dark:group-hover/row:bg-emerald-950/30",
   }
 }
+/**
+ * Two different claims, so two different words. "Just published" means the object went live
+ * through the publish path; a row created by the editor create path exists on Meta but is PAUSED
+ * and unfinished, and saying "published" about it would be untrue (ui-truthfulness contract).
+ */
+function NewRowBadge({ label }: { label: string | null }) {
+  if (!label) return null
+  return (
+    <span className="shrink-0 rounded-full border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
+      {label}
+    </span>
+  )
+}
 const FROZEN_BODY_SEL = "bg-[#e3f0fe] dark:bg-[#1d2235]"
 const FROZEN_BAND_BG = "bg-[#f5f6f7] dark:bg-background"
 /**
@@ -1368,6 +1399,16 @@ function AdsManagerContent() {
   const [defaultPrimaryText, setDefaultPrimaryText] = useState("")
   const [createModalOpen, setCreateModalOpen] = useState(false)
   const [createInitialState, setCreateInitialState] = useState<Partial<CampaignFormState> | undefined>()
+  // BL-64 slice 4. The default Create route is now gate → Meta shell → editor. The legacy wizard
+  // (`CreateCampaignModal`, phase "editor") is deliberately kept as the only way back if this path
+  // breaks in production — there is no feature flag and no CI (TD-12/TD-06).
+  const [entryGateOpen, setEntryGateOpen] = useState(false)
+  const [creatingHierarchy, setCreatingHierarchy] = useState(false)
+  const [createHierarchyError, setCreateHierarchyError] = useState("")
+  /** Created this session and PAUSED — a different claim from "just published", so a different badge. */
+  const [justCreatedIds, setJustCreatedIds] = useState<Set<string>>(new Set())
+  const justCreatedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (justCreatedTimer.current) clearTimeout(justCreatedTimer.current) }, [])
   // Rows this session just published. The refetch after a publish drops the new objects into a list
   // that can be hundreds long and sorted by spend, where a brand-new PAUSED object sinks to the
   // bottom — so the toast says "published" and the table shows no visible change. Holding the ids
@@ -1642,6 +1683,154 @@ function AdsManagerContent() {
     if (target.campaignId) editorParams.set("campaign", target.campaignId)
     if (target.adSetId) editorParams.set("adset", target.adSetId)
     router.push(`/ads-manager/editor?${editorParams.toString()}`)
+  }
+
+  const newRowLabel = (id: string): string | null =>
+    justPublishedIds.has(id) ? "Just published" : justCreatedIds.has(id) ? "New · paused" : null
+
+  const localNodeId = (level: "adset" | "ad") =>
+    `local:${level}:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+
+  /**
+   * BL-64 slice 4 — the default Create route.
+   *
+   * Gate answers become form state exactly as `CreateCampaignModal.enterEditor` folds them, then:
+   * campaign shell is created on Meta as PAUSED, the ad set is created under it when the ODAX chain
+   * can already be resolved, and the ad is staged locally (Meta needs a Page, a creative, headline,
+   * body and a link before an ad can exist — the gate collects none of them). All three enter the
+   * session ledger, so Discard-on-Meta in the editor can reverse whatever actually reached Meta.
+   *
+   * A child failure never strands the buyer in an empty campaign silently: the shell stays in the
+   * ledger (deletable), the reason travels with the handoff and the editor shows it.
+   */
+  const startEditorCreate = async (result: EntryGateResult) => {
+    if (creatingHierarchy || !selectedAccountId) return
+    const chosenMode: SetupMode = result.setupMode
+    const attach = result.scope === "existing" ? result.existingCampaign : undefined
+    const formState: CampaignFormState = {
+      ...defaultCampaignState,
+      ...normalizeOdaxSelection({
+        objective: result.objective,
+        conversionLocation: defaultCampaignState.conversionLocation,
+        engagementType: defaultCampaignState.engagementType,
+        performanceGoal: defaultCampaignState.performanceGoal,
+      }),
+      // Same meaning as the legacy gate: recommended = the three Advantage switches on.
+      ...(chosenMode === "recommended"
+        ? { placementMode: "advantage" as const, targetingExpansion: true, advantageCampaignBudget: true }
+        : { placementMode: "manual" as const, targetingExpansion: false, advantageCampaignBudget: false }),
+      // Attaching: the budget mode is a fact about the campaign, not a preference.
+      ...(attach
+        ? {
+            existingCampaignId: attach.id,
+            existingCampaignName: attach.name,
+            campaignName: attach.name,
+            advantageCampaignBudget: attach.hasCampaignBudget,
+          }
+        : {}),
+    }
+
+    setCreatingHierarchy(true)
+    setCreateHierarchyError("")
+    let ledger: SessionCreatedLedger = createSessionCreatedLedger()
+    let campaignId = attach?.id || ""
+    try {
+      if (!attach) {
+        const response = await fetch("/api/facebook/create-campaign-shell", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ adAccountId: selectedAccountId, ...formStateToCampaignShell(formState) }),
+        })
+        const data = await response.json()
+        if (!response.ok || !data.campaignId) throw new Error(data.error || "Failed to create the campaign on Meta")
+        campaignId = data.campaignId as string
+        ledger = appendCreatedNode(ledger, { nodeId: campaignId, level: "campaign", metaId: campaignId })
+      } else {
+        // A campaign that existed before this session is an anchor: recorded so its new children
+        // have a parent, never a candidate for Discard.
+        ledger = anchorExistingNode(ledger, { nodeId: campaignId, level: "campaign", metaId: campaignId })
+      }
+    } catch (error) {
+      setCreatingHierarchy(false)
+      setCreateHierarchyError(error instanceof Error ? error.message : "Failed to create the campaign on Meta")
+      return
+    }
+
+    const adSetNodeId = localNodeId("adset")
+    const adNodeId = localNodeId("ad")
+    const { adSet, ad, adSetBlockedReason } = buildEntryHierarchyDrafts(formState, campaignId, { adSetNodeId, adNodeId })
+    ledger = appendCreatedNode(ledger, { nodeId: adSetNodeId, level: "adset", parentNodeId: campaignId })
+    ledger = appendCreatedNode(ledger, { nodeId: adNodeId, level: "ad", parentNodeId: adSetNodeId })
+
+    let adSetId = adSetNodeId
+    let batchId: string | undefined
+    let childError = adSetBlockedReason
+    if (!adSetBlockedReason) {
+      try {
+        const response = await fetch("/api/ads-manager/workspace-materialize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            adAccountId: selectedAccountId,
+            nodes: workspaceDraftsToMaterializeNodes(
+              [{ node: adSet, level: "adset" }],
+              [{ node: { id: campaignId, name: formState.campaignName }, level: "campaign" }],
+            ),
+          }),
+        })
+        const data = await response.json()
+        if (!response.ok) throw new Error(data.error || "Failed to create the ad set on Meta")
+        if (data.batchId) {
+          batchId = data.batchId as string
+          ledger = setBatchId(ledger, batchId)
+        }
+        const outcome = (Array.isArray(data.results) ? data.results : [])
+          .find((entry: { nodeId?: string }) => entry?.nodeId === adSetNodeId)
+        if (outcome?.status === "materialized" && outcome.metaId) {
+          ledger = remapCreatedNode(ledger, adSetNodeId, outcome.metaId as string)
+          adSetId = outcome.metaId as string
+          adSet.id = adSetId
+          ad.adset_id = adSetId
+        } else {
+          childError = outcome?.message || data.auditError || "The ad set was not created on Meta."
+        }
+      } catch (error) {
+        childError = error instanceof Error ? error.message : "Failed to create the ad set on Meta"
+      }
+    }
+
+    const createdMetaIds = [campaignId, ...(adSetId === adSetNodeId ? [] : [adSetId])].filter(Boolean)
+    const treeRow = (node: WorkspaceNode) => ({ ...node })
+    saveWorkspaceEntryHandoff({
+      accountId: selectedAccountId,
+      campaignId,
+      drafts: {
+        [`adset:${adSet.id}`]: adSet,
+        [`ad:${ad.id}`]: ad,
+      },
+      localCampaigns: [{ id: campaignId, name: formState.campaignName, status: "PAUSED", objective: formState.objective }],
+      localAdSets: [treeRow(adSet)],
+      localAds: [treeRow(ad)],
+      ledger,
+      batchId,
+      createdMetaIds,
+      error: childError || undefined,
+    })
+
+    clientCache.current.clear()
+    if (justCreatedTimer.current) clearTimeout(justCreatedTimer.current)
+    setJustCreatedIds(new Set(createdMetaIds))
+    await fetchMainData(true)
+    justCreatedTimer.current = setTimeout(() => setJustCreatedIds(new Set()), 12000)
+    setCreatingHierarchy(false)
+    setEntryGateOpen(false)
+    pushWorkspaceEditor({
+      level: "campaign",
+      id: campaignId,
+      campaignId,
+      // A local id is not addressable by the editor route's hierarchy read.
+      adSetId: adSetId.startsWith("local:") ? undefined : adSetId,
+    })
   }
 
   const openWorkspaceEditor = (clicked: { id: string; name: string }) => {
@@ -4104,6 +4293,30 @@ function AdsManagerContent() {
 
   return (
     <div className="relative flex flex-col h-full overflow-hidden bg-background">
+      {entryGateOpen && (
+        <>
+          <CreateEntryGate
+            open
+            objective={defaultCampaignState.objective}
+            setupMode="recommended"
+            accountId={selectedAccountId}
+            onCancel={() => { setEntryGateOpen(false); setCreateHierarchyError("") }}
+            onContinue={startEditorCreate}
+          />
+          {creatingHierarchy && (
+            <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40">
+              <div className="rounded-md bg-white px-4 py-3 text-sm shadow-lg dark:bg-card">
+                Creating the campaign on Meta (paused)…
+              </div>
+            </div>
+          )}
+          {createHierarchyError && (
+            <div className="fixed inset-x-0 top-4 z-[70] mx-auto w-fit max-w-[90vw] rounded-md border border-red-300 bg-red-50 px-4 py-2 text-sm text-red-700 shadow-lg dark:border-red-800 dark:bg-red-950/60 dark:text-red-300">
+              {createHierarchyError}
+            </div>
+          )}
+        </>
+      )}
       <CreateCampaignModal
         open={createModalOpen}
         initialState={createInitialState}
@@ -4371,9 +4584,26 @@ function AdsManagerContent() {
 
       {/* ── Action toolbar ── */}
       <div className="flex items-center gap-2 px-4 py-2.5 border-b shrink-0 flex-wrap bg-white dark:bg-background">
-        <button onClick={() => setCreateModalOpen(true)} className="flex items-center gap-1.5 h-7 px-3 text-xs rounded bg-primary hover:bg-primary/90 text-primary-foreground transition-colors font-semibold shadow-sm">
+        <button
+          onClick={() => {
+            // Without the workspace editor there is nothing to land in, so the legacy wizard is not
+            // a fallback here — it is the only path.
+            if (workspaceAccess.enabled) { setCreateHierarchyError(""); setEntryGateOpen(true) }
+            else setCreateModalOpen(true)
+          }}
+          className="flex items-center gap-1.5 h-7 px-3 text-xs rounded bg-primary hover:bg-primary/90 text-primary-foreground transition-colors font-semibold shadow-sm"
+        >
           <IconPlus className="size-3.5" />Create
         </button>
+        {workspaceAccess.enabled && (
+          <button
+            onClick={() => setCreateModalOpen(true)}
+            title="Open the previous Create Campaign wizard. Kept as the fallback while the editor create path settles (BL-64)."
+            className="h-7 px-2 text-xs rounded border border-[#ccd0d5] dark:border-gray-700 bg-transparent hover:bg-muted/60 transition-colors text-muted-foreground"
+          >
+            Classic
+          </button>
+        )}
         <button
           disabled={selectedIds.size === 0}
           onClick={openDuplicateDialog}
@@ -4725,7 +4955,7 @@ function AdsManagerContent() {
                   const bg = rowBg(idx)
                   const isSel = selectedIds.has(c.id)
                   const hasDraft = Boolean(bulkDrafts[bulkDraftKey("campaign", c.id)])
-                  const { tinted, tintRow, tintCell, tintHover } = rowTint(justPublishedIds.has(c.id), hasDraft)
+                  const { tinted, tintRow, tintCell, tintHover } = rowTint(Boolean(newRowLabel(c.id)), hasDraft)
                   const rowBDs = sortedBreakdownRows(c.id, c.objective)
                   return (
                     <Fragment key={c.id}>
@@ -4747,7 +4977,7 @@ function AdsManagerContent() {
                               <div className="flex items-center gap-2">
                                 <button onClick={() => drillToAdSets(c)} className="text-[#1877f2] hover:underline text-xs font-semibold text-left line-clamp-2">{c.name}</button>
                                 {hasDraft && <span className="shrink-0 rounded-full border border-emerald-300 bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300">Unpublished edits</span>}
-                                {justPublishedIds.has(c.id) && <span className="shrink-0 rounded-full border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">Just published</span>}
+                                <NewRowBadge label={newRowLabel(c.id)} />
                                 <button onClick={e => { e.stopPropagation(); setInlineEditingId(c.id); setInlineEditingName(c.name) }} className="opacity-0 group-hover/cell:opacity-100 p-0.5 hover:bg-black/5 rounded transition-opacity"><IconPencil className="size-3 text-[#65676b]" /></button>
                               </div>
                               <div className="flex items-center gap-1.5 opacity-0 group-hover/cell:opacity-100 transition-opacity">
@@ -4782,7 +5012,7 @@ function AdsManagerContent() {
                   const bg = rowBg(idx)
                   const isSel = selectedIds.has(a.id)
                   const hasDraft = Boolean(bulkDrafts[bulkDraftKey("adset", a.id)])
-                  const { tinted, tintRow, tintCell, tintHover } = rowTint(justPublishedIds.has(a.id), hasDraft)
+                  const { tinted, tintRow, tintCell, tintHover } = rowTint(Boolean(newRowLabel(a.id)), hasDraft)
                   const objective = campaigns.find(c => c.id === a.campaign_id)?.objective
                   const rowBDs = sortedBreakdownRows(a.id, objective)
                   return (
@@ -4804,7 +5034,7 @@ function AdsManagerContent() {
                               <div className="flex items-center gap-2">
                                 <button onClick={() => drillToAds(a)} className="text-[#1877f2] hover:underline text-xs font-semibold text-left line-clamp-2">{a.name}</button>
                                 {hasDraft && <span className="shrink-0 rounded-full border border-emerald-300 bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300">Unpublished edits</span>}
-                                {justPublishedIds.has(a.id) && <span className="shrink-0 rounded-full border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">Just published</span>}
+                                <NewRowBadge label={newRowLabel(a.id)} />
                                 <button onClick={e => { e.stopPropagation(); setInlineEditingId(a.id); setInlineEditingName(a.name) }} className="opacity-0 group-hover/cell:opacity-100 p-0.5 hover:bg-black/5 rounded transition-opacity"><IconPencil className="size-3 text-[#65676b]" /></button>
                               </div>
                               <div className="flex items-center gap-1.5 opacity-0 group-hover/cell:opacity-100 transition-opacity">
@@ -4840,7 +5070,7 @@ function AdsManagerContent() {
                   const adSet = adSets.find(s => s.id === a.adset_id)
                   const isSel = selectedIds.has(a.id)
                   const hasDraft = Boolean(bulkDrafts[bulkDraftKey("ad", a.id)])
-                  const { tinted, tintRow, tintCell, tintHover } = rowTint(justPublishedIds.has(a.id), hasDraft)
+                  const { tinted, tintRow, tintCell, tintHover } = rowTint(Boolean(newRowLabel(a.id)), hasDraft)
                   const thumb =a.creative?.thumbnail_url || a.creative?.image_url
                   const objective = campaigns.find(c => c.id === a.campaign_id)?.objective
                   const rowBDs = sortedBreakdownRows(a.id, objective)
@@ -4863,7 +5093,7 @@ function AdsManagerContent() {
                               <div className="flex items-center gap-2">
                                 <button onClick={() => openWorkspaceEditor(a)} className="text-[#1877f2] hover:underline text-xs font-semibold text-left line-clamp-2">{a.name}</button>
                                 {hasDraft && <span className="shrink-0 rounded-full border border-emerald-300 bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300">Unpublished edits</span>}
-                                {justPublishedIds.has(a.id) && <span className="shrink-0 rounded-full border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">Just published</span>}
+                                <NewRowBadge label={newRowLabel(a.id)} />
                                 <button onClick={e => { e.stopPropagation(); setInlineEditingId(a.id); setInlineEditingName(a.name) }} className="opacity-0 group-hover/cell:opacity-100 p-0.5 hover:bg-black/5 rounded transition-opacity"><IconPencil className="size-3 text-[#65676b]" /></button>
                               </div>
                               <div className="flex items-center gap-1.5 opacity-0 group-hover/cell:opacity-100 transition-opacity">
@@ -6247,6 +6477,7 @@ function AdsManagerContent() {
           rows={performancePopup.rows}
           level={level}
           accountId={selectedAccountId}
+          timezoneName={selectedAccount?.timezone_name}
           datePreset={datePreset === "custom" ? "last_30d" : datePreset}
           since={drawerSince}
           until={drawerUntil}
@@ -6264,7 +6495,8 @@ function AdsManagerContent() {
           onCreate={() => {
             setPerformancePopup(null)
             setCreateInitialState(undefined)
-            setCreateModalOpen(true)
+            if (workspaceAccess.enabled) { setCreateHierarchyError(""); setEntryGateOpen(true) }
+            else setCreateModalOpen(true)
           }}
           onCreateReplacement={openReplacementCreate}
           onPublished={() => {

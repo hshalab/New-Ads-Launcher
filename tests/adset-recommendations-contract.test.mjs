@@ -128,9 +128,9 @@ describe("ad set recommendations", () => {
   })
 
   it("keeps the create modal above the global feedback bubble", () => {
-    // components/feedback-bubble.tsx is `fixed bottom-6 right-6 z-50` and mounts after the modal,
-    // so at equal z it paints over the footer's Publish button.
-    assert.match(read("components/feedback-bubble.tsx"), /fixed bottom-6 right-6 z-50/)
+    // components/feedback-bubble.tsx is `fixed right-6 z-50` (bottom offset varies by route) and
+    // mounts after the modal, so at equal z it would paint over the footer's Publish button.
+    assert.match(read("components/feedback-bubble.tsx"), /fixed right-6 z-50/)
     for (const path of [
       "components/ads-manager/create-flow/CreateCampaignModal.tsx",
       "components/ads-manager/create-flow/CreateEntryGate.tsx",

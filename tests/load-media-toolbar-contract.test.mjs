@@ -36,6 +36,25 @@ const libraryTab = () => {
   return s.slice(start, end)
 }
 
+describe("Load Media: Create Campaign layering", () => {
+  it("renders above the Classic Create Campaign parent dialog", () => {
+    const createModal = readFileSync(join(root, "components/ads-manager/create-flow/CreateCampaignModal.tsx"), "utf8")
+    const dialog = readFileSync(join(root, "components/ui/dialog.tsx"), "utf8")
+    assert.match(createModal, /fixed inset-0 z-\[60\]/)
+    assert.match(src(), /className="z-\[70\][^"]*"/)
+    assert.match(src(), /overlayClassName="z-\[70\]"/)
+    assert.match(dialog, /overlayClassName\?: string/)
+    assert.match(dialog, /<DialogOverlay className=\{overlayClassName\}/)
+  })
+
+  it("opens from Classic Create unless its upload is active", () => {
+    const adLevel = readFileSync(join(root, "components/ads-manager/create-flow/AdLevel.tsx"), "utf8")
+    assert.match(adLevel, /onClick=\{\(\) => setPickerOpen\(true\)\}/)
+    assert.match(adLevel, /disabled=\{mediaUploading\}/)
+    assert.match(adLevel, /<LoadMediaModal[\s\S]*open=\{pickerOpen\}/)
+  })
+})
+
 describe("Load Media: no separate search UI", () => {
   it("has no Search submit button", () => {
     // Typing filters live. A button here can only imply otherwise.

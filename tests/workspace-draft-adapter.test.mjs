@@ -193,6 +193,7 @@ describe("workspace materialize adapter", () => {
     link: "https://example.com",
     cta: "SHOP_NOW",
     primary_text_variations: ["Variation"],
+    url_parameters: "utm_source=facebook",
   }
 
   it("puts context parents first without writing them", () => {
@@ -227,6 +228,7 @@ describe("workspace materialize adapter", () => {
     assert.equal(nodes[1].body, "Primary text")
     assert.equal(nodes[1].linkUrl, "https://example.com")
     assert.deepEqual(nodes[1].primaryTextVariations, ["Variation"])
+    assert.equal(nodes[1].urlParameters, "utm_source=facebook")
     assert.equal("draft_of" in nodes[1], false)
     assert.equal("creative_file_name" in nodes[1], false)
   })

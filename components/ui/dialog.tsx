@@ -67,10 +67,12 @@ function DialogOverlay({
 
 function DialogContent({
   className,
+  overlayClassName,
   children,
   showCloseButton = true,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
+  overlayClassName?: string
   showCloseButton?: boolean
 }) {
   const describedBy = props["aria-describedby"]
@@ -80,7 +82,7 @@ function DialogContent({
 
   return (
     <DialogPortal>
-      <DialogOverlay />
+      <DialogOverlay className={overlayClassName} />
       <DialogPrimitive.Content
         data-slot="dialog-content"
         {...(describedBy !== undefined || !hasDescription

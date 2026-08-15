@@ -57,6 +57,7 @@ type MaterializeNode = {
   primaryTextVariations?: string[]
   headlineVariations?: string[]
   descriptionVariations?: string[]
+  urlParameters?: string
   creativeId?: string
   creativeThumb?: string
 }
@@ -191,6 +192,7 @@ export async function POST(request: NextRequest) {
             await updateNode(node.metaId, connection.access_token, {
               name: node.name,
               status: "PAUSED",
+              special_ad_categories: node.level === "campaign" ? node.specialAdCategories : undefined,
               daily_budget: moneyFromMinor(node.dailyBudget),
               lifetime_budget: moneyFromMinor(node.lifetimeBudget),
               start_time: node.startTime,
@@ -272,6 +274,8 @@ export async function POST(request: NextRequest) {
               titles: node.headlineVariations || [],
               descriptions: node.descriptionVariations || [],
             },
+            omit_degrees_of_freedom_spec: true,
+            url_tags: node.urlParameters,
           }, tokenOpts)
           metaId = created.id
           status = "materialized"

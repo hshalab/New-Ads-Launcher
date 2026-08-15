@@ -45,15 +45,17 @@ describe("BL-64 Discard on Meta (session-created ledger ↔ /api/facebook/delete
   })
 
   it("words the two discards differently — one clears the browser, one deletes on Meta", () => {
-    assert.match(editor, /Discard local edit/)
-    assert.match(editor, /Delete \$\{metaDraftCount\} draft\$\{metaDraftCount === 1 \? "" : "s"\} on Meta/)
+    // Both controls now live only on the Review screen (popup) — the Edit-view footer (editor)
+    // dropped its own copies so the footer carries fewer CTAs; local discard there is the kebab
+    // menu's "Discard draft" instead.
     assert.match(popup, /Discard local edits/)
     assert.match(popup, /Delete \$\{metaDraftCount\} draft\(s\) on Meta/)
+    assert.doesNotMatch(editor, /Delete \$\{metaDraftCount\}/)
   })
 
   it("disables the Meta delete when this session created nothing there", () => {
-    assert.match(editor, /metaDraftCount === 0/)
     assert.match(popup, /const metaDraftCount = pendingDeletes\(sessionLedger\)\.length/)
+    assert.match(popup, /metaDraftCount === 0/)
   })
 
   it("warns before close that Save Draft objects survive a local discard", () => {
