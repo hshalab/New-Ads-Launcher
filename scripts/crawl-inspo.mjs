@@ -5,13 +5,17 @@
  * Setup on MacMini:
  *   1. Copy .env.local values to this script or use dotenv
  *   2. Run: node scripts/crawl-inspo.mjs
- *   3. Add to crontab: 0 */6 * * * cd /path/to/project && node scripts/crawl-inspo.mjs >> /tmp/crawl-inspo.log 2>&1
+ *   3. Add the crontab line printed directly below this block (every 6 hours).
  *
  * Usage:
  *   node scripts/crawl-inspo.mjs               # default crawl
  *   node scripts/crawl-inspo.mjs --country VN  # specific country
  *   node scripts/crawl-inspo.mjs --limit 200   # more ads per term
  */
+
+// The crontab line lives outside the block comment on purpose: its `*/6` closes a
+// `/** */` block, which is what made this whole file fail to parse.
+// crontab: 0 */6 * * * cd /path/to/project && node scripts/crawl-inspo.mjs >> /tmp/crawl-inspo.log 2>&1
 
 import { createClient } from "@supabase/supabase-js"
 

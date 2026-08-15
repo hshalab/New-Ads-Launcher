@@ -25,14 +25,20 @@ export async function GET(request: NextRequest) {
     const days = (Date.now() - since.getTime()) / 86400000
     prevSince.setDate(prevSince.getDate() - Math.round(days))
 
-    let q = supabase.from("comments").select("*").eq("org_id", ctx.orgId).gte("fb_created_time", since.toISOString())
+    // Only the five columns this aggregation reads. `select("*")` also pulled the
+    // comment body and every Meta id for each row — megabytes of text over the wire
+    // for numbers that never use it.
+    const ANALYTICS_SELECT = "sentiment, sentiment_score, like_count, fb_created_time, themes"
+
+    let q = supabase.from("comments").select(ANALYTICS_SELECT).eq("org_id", ctx.orgId).gte("fb_created_time", since.toISOString())
     if (pageId) q = q.eq("page_id", pageId)
-    const { data: comments } = await q
 
     let qp = supabase.from("comments").select("sentiment, sentiment_score, like_count").eq("org_id", ctx.orgId)
       .gte("fb_created_time", prevSince.toISOString()).lt("fb_created_time", since.toISOString())
     if (pageId) qp = qp.eq("page_id", pageId)
-    const { data: prevComments } = await qp
+
+    // The two windows are disjoint and independent — one round trip, not two.
+    const [{ data: comments }, { data: prevComments }] = await Promise.all([q, qp])
 
     const list = comments || []
     const prev = prevComments || []
