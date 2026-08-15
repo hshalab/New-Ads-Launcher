@@ -14,15 +14,16 @@ describe("Launch live progress contract", () => {
     // Fixed bottom-right of the viewport, offset left of the feedback bubble
     // (right-20 ≈ 80px clears the ~48px feedback button at right-4).
     assert.match(dialog, /fixed bottom-4 right-20/)
-    assert.match(dialog, /onClick=\{\(\) => onOpenChange\(true\)\}/)
+    assert.doesNotMatch(dialog, /Open details/)
   })
 
   it("expands the minimized status dock with per-ad progress from the launch result", () => {
     const dialog = read("components/launch/launch-progress-dialog.tsx")
 
-    assert.match(dialog, /const \[expanded, setExpanded\] = useState\(false\)/)
-    assert.match(dialog, /result\?\.ads \|\| \[\]/)
-    assert.match(dialog, /Per-ad status is not exposed until this launch request completes\./)
+    assert.match(dialog, /const ads = result\?\.ads \|\| plannedAds/)
+    assert.match(dialog, /ad\.status === "launching"/)
+    assert.doesNotMatch(dialog, /Open details/)
+    assert.doesNotMatch(dialog, /setExpanded/)
   })
 
   it("removes bulk activation controls from Configure Ad Sets", () => {
@@ -54,7 +55,7 @@ describe("Launch live progress contract", () => {
     assert.match(page, /useEffect\(\(\) => \{ fetchMainData\(\) \}, \[fetchMainData\]\)/)
   })
 
-  it("sorts newest launch time first, then active status", () => {
+  it("sorts active delivery first, then newest launch time", () => {
     const page = read("app/(dashboard)/ads-manager/page.tsx")
     const comparator = page.slice(
       page.indexOf("const byNewestFirst = ("),
@@ -63,7 +64,12 @@ describe("Launch live progress contract", () => {
 
     assert.match(comparator, /effective_status === "ACTIVE"/)
     assert.match(comparator, /return bt - at/)
-    assert.ok(comparator.indexOf("return bt - at") < comparator.indexOf('effective_status === "ACTIVE"'))
+    assert.ok(comparator.indexOf('effective_status === "ACTIVE"') < comparator.indexOf("return bt - at"))
+    assert.match(page, /fetchActiveFirstPage/)
+    assert.match(page, /statusFilter === "all"/)
+    assert.match(page, /const PAGE_SIZE = 20/)
+    assert.match(page, /hasInactiveAfter/)
+    assert.match(page, /\.slice\(0, limit\)/)
   })
 
   it("caps refresh API pagination at the requested row count", () => {

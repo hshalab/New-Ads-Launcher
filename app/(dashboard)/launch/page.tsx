@@ -1,6 +1,6 @@
 "use client"
 import dynamic from "next/dynamic"
-import { LaunchProgressDialog, LaunchPhase } from "@/components/launch/launch-progress-dialog"
+import { LaunchProgressDialog, LaunchPhase, type LaunchProgressAd } from "@/components/launch/launch-progress-dialog"
 
 const CreateCampaignModal = dynamic(
   () => import("@/components/ads-manager/create-flow/CreateCampaignModal").then(m => m.CreateCampaignModal),
@@ -92,7 +92,9 @@ interface FacebookPage { id: string; name: string; picture?: { data: { url: stri
 interface AdAccountItem { id: string; name: string; account_id?: string }
 interface SitelinkItem { title: string; url: string }
 interface TableRow { id: string; creative: Creative | null; adName: string; primaryText: string; headline: string; description: string; adSetIds: string[]; primaryTextVariations?: string[]; headlineVariations?: string[]; descriptionVariations?: string[]; cta?: string; webLink?: string; urlTags?: string; promoCode?: string; launchAsActive?: boolean; pageId?: string; igId?: string; sitelinks?: SitelinkItem[]; partnership?: PartnershipState; multilanguage?: MultilanguageState; catalog?: CatalogAdsState; schedule?: { start: string; end?: string } }
-interface CreatedAd { adId: string; adSetId: string; adSetName: string; creativeId?: string; fileName?: string; thumbnailUrl?: string | null; mediaType?: "image" | "video"; mode?: string; multiGroup?: string; flexibleAd?: string; carousel?: string }
+interface CreatedAd { adId: string; adSetId: string; adSetName: string; adName?: string; creativeId?: string; fileName?: string; thumbnailUrl?: string | null; mediaType?: "image" | "video"; mode?: string; multiGroup?: string; flexibleAd?: string; carousel?: string }
+interface LaunchMetaObjectDetail { id: string; name: string; bid_strategy?: string; bid_amount?: string; bid_constraints?: { roas_average_floor?: string | number }; optimization_goal?: string; daily_budget?: string; lifetime_budget?: string }
+interface LaunchAdDetail { id: string; name: string; effective_status?: string; campaign?: LaunchMetaObjectDetail; adset?: LaunchMetaObjectDetail }
 interface LaunchMeta { cta: string; webLink: string; headline: string; primaryText: string; pageId: string; pageName?: string; adAccountId: string; adAccountName: string; timestamp: string }
 interface LaunchResult { created: number; failed: number; durationMs: number; errors: { adSetId: string; fileName: string; error: string }[]; scheduled?: { at: string; end: string | null } | null; scheduleError?: string | null; auditError?: string | null; createdAds: CreatedAd[]; batchId?: string | null; launchMeta?: LaunchMeta }
 interface UploadItem {
@@ -9243,11 +9245,61 @@ function DetailItem({ label, value, copyable, mono }: { label: string; value: st
   )
 }
 
-function AdResultRow({ index, ad, status, expanded, onToggle, launchMeta, batchId }: {
-  index: number; ad: CreatedAd; status?: string; expanded: boolean; onToggle: () => void; launchMeta?: LaunchMeta; batchId?: string | null
+function formatLaunchMoney(raw: string, currency: string) {
+  try {
+    const formatter = new Intl.NumberFormat(undefined, { style: "currency", currency })
+    const divisor = 10 ** (formatter.resolvedOptions().maximumFractionDigits ?? 2)
+    return formatter.format(Number(raw) / divisor)
+  } catch {
+    return `${(Number(raw) / 100).toLocaleString()} ${currency}`
+  }
+}
+
+function formatLaunchBudget(owner?: LaunchMetaObjectDetail, currency = "USD") {
+  const raw = owner?.daily_budget || owner?.lifetime_budget
+  if (!raw || !Number.isFinite(Number(raw))) return "—"
+  try {
+    const amount = formatLaunchMoney(raw, currency)
+    return owner?.daily_budget ? `${amount}/day` : `${amount} lifetime`
+  } catch {
+    const amount = Number(raw) / 100
+    return `${amount.toLocaleString()} ${currency}${owner?.daily_budget ? "/day" : " lifetime"}`
+  }
+}
+
+function formatLaunchBidStrategy(strategy: string | undefined, adset: LaunchMetaObjectDetail | undefined, currency = "USD") {
+  if (!strategy) return "—"
+  const amount = adset?.bid_amount && Number.isFinite(Number(adset.bid_amount))
+    ? formatLaunchMoney(adset.bid_amount, currency)
+    : ""
+  if (strategy === "COST_CAP") return `Cost per result goal${amount ? ` (${amount})` : ""}`
+  if (strategy === "LOWEST_COST_WITH_BID_CAP") return `Bid cap${amount ? ` (${amount})` : ""}`
+  if (strategy === "LOWEST_COST_WITH_MIN_ROAS") {
+    const floor = Number(adset?.bid_constraints?.roas_average_floor)
+    return Number.isFinite(floor) ? `ROAS goal (${floor / 10000})` : "ROAS goal"
+  }
+  if (strategy === "LOWEST_COST_WITHOUT_CAP") return adset?.optimization_goal === "VALUE" ? "Highest value" : "Highest volume"
+  return strategy
+}
+
+function formatLaunchCampaignBidStrategy(strategy: string | undefined, adset: LaunchMetaObjectDetail | undefined) {
+  if (!strategy) return "—"
+  if (strategy === "COST_CAP") return "Cost cap"
+  if (strategy === "LOWEST_COST_WITH_BID_CAP") return "Bid cap"
+  if (strategy === "LOWEST_COST_WITH_MIN_ROAS") return "ROAS goal"
+  if (strategy === "LOWEST_COST_WITHOUT_CAP") return adset?.optimization_goal === "VALUE" ? "Highest value" : "Highest volume"
+  return strategy
+}
+
+function AdResultRow({ index, ad, detail, currency, status, expanded, onToggle, launchMeta }: {
+  index: number; ad: CreatedAd; detail?: LaunchAdDetail; currency?: string; status?: string; expanded: boolean; onToggle: () => void; launchMeta?: LaunchMeta
 }) {
-  const displayName = ad.fileName?.replace(/\.[^/.]+$/, "") || ad.multiGroup || ad.flexibleAd || ad.carousel || `Ad ${index}`
-  const metaUrl = batchId ? `/ads-manager?batch=${batchId}` : "/ads-manager"
+  const displayName = detail?.name || ad.adName || ad.fileName?.replace(/\.[^/.]+$/, "") || ad.multiGroup || ad.flexibleAd || ad.carousel || `Ad ${index}`
+  const campaignHasBudget = Boolean(detail?.campaign?.daily_budget || detail?.campaign?.lifetime_budget)
+  const campaignBudget = !detail ? "—" : campaignHasBudget ? formatLaunchBudget(detail.campaign, currency) : "Using ad set budget"
+  const adSetBudget = !detail ? "—" : campaignHasBudget ? "Using campaign budget" : formatLaunchBudget(detail.adset, currency)
+  const effectiveBidStrategy = detail?.adset?.bid_strategy || detail?.campaign?.bid_strategy
+  const deliveryStatus = detail?.effective_status || status
   return (
     <>
       <tr className={cn("border-b last:border-0 hover:bg-muted/20 cursor-pointer select-none", expanded && "bg-muted/30")} onClick={onToggle}>
@@ -9259,30 +9311,28 @@ function AdResultRow({ index, ad, status, expanded, onToggle, launchMeta, batchI
             ? <img src={ad.thumbnailUrl} className="size-8 rounded object-cover" onError={e => e.currentTarget.style.display="none"} />
             : <div className="size-8 rounded bg-muted flex items-center justify-center">{ad.mediaType === "video" ? <IconVideo className="size-3 text-muted-foreground" /> : <IconPhoto className="size-3 text-muted-foreground" />}</div>}
         </td>
-        <td className="px-2 text-xs font-medium max-w-[140px] truncate" title={displayName}>{displayName}</td>
-        <td className="px-2 w-28">
-          {status
-            ? <span className={cn("px-1.5 py-0.5 rounded text-xs font-semibold uppercase", status === "ACTIVE" ? "bg-green-100 text-green-700" : status === "PAUSED" ? "bg-yellow-100 text-yellow-700" : "bg-gray-100 text-gray-500")}>{status}</span>
+        <td className="px-3 text-xs font-medium min-w-44 max-w-56 truncate" title={detail?.campaign?.name}>{detail?.campaign?.name || "—"}</td>
+        <td className="px-3 text-xs text-muted-foreground min-w-36" title={detail?.campaign?.bid_strategy}>{formatLaunchCampaignBidStrategy(detail?.campaign?.bid_strategy, detail?.adset)}</td>
+        <td className="px-3 text-xs text-muted-foreground min-w-36">{campaignBudget}</td>
+        <td className="px-3 text-xs font-medium min-w-44 max-w-56 truncate" title={detail?.adset?.name || ad.adSetName}>{detail?.adset?.name || ad.adSetName || "—"}</td>
+        <td className="px-3 text-xs text-muted-foreground min-w-36" title={effectiveBidStrategy}>{formatLaunchBidStrategy(effectiveBidStrategy, detail?.adset, currency)}</td>
+        <td className="px-3 text-xs text-muted-foreground min-w-36">{adSetBudget}</td>
+        <td className="px-3 text-xs font-medium min-w-44 max-w-56 truncate" title={displayName}>{displayName}</td>
+        <td className="px-3 w-28">
+          {deliveryStatus
+            ? <span className={cn("px-1.5 py-0.5 rounded text-xs font-semibold uppercase", deliveryStatus === "ACTIVE" ? "bg-green-100 text-green-700" : deliveryStatus.includes("PAUSED") ? "bg-yellow-100 text-yellow-700" : "bg-gray-100 text-gray-500")}>{deliveryStatus}</span>
             : <span className="flex items-center gap-1 text-green-600 text-xs font-medium"><IconCircleCheck className="size-3" />Success</span>}
         </td>
-        <td className="px-2 w-40">
-          <div className="flex items-center gap-1">
-            <span className="font-mono text-xs text-muted-foreground">{ad.adId.slice(0, 15)}…</span>
-            <CopyBtn value={ad.adId} />
-            <a href={metaUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="text-primary hover:text-primary"><IconExternalLink className="size-3" /></a>
-          </div>
-        </td>
-        <td className="px-2 text-xs text-muted-foreground truncate max-w-[120px]" title={ad.adSetName}>{ad.adSetName}</td>
       </tr>
       {expanded && (
         <tr className="bg-muted/10 border-b">
-          <td colSpan={6} className="px-5">
+          <td colSpan={10} className="px-5">
             <div className="grid grid-cols-2 gap-x-8 gap-y-1">
               {launchMeta?.adAccountName && <DetailItem label="Account" value={launchMeta.adAccountName} />}
-              <DetailItem label="Ad Set" value={ad.adSetName} />
+              <DetailItem label="Campaign" value={detail?.campaign?.name || "—"} />
+              <DetailItem label="Ad Set" value={detail?.adset?.name || ad.adSetName || "—"} />
               {launchMeta?.cta && <DetailItem label="CTA" value={launchMeta.cta} />}
               {launchMeta?.webLink && <DetailItem label="Web Link" value={launchMeta.webLink} copyable />}
-              <DetailItem label="Ad ID" value={ad.adId} copyable mono />
               {ad.thumbnailUrl && <DetailItem label="Media URL" value={ad.thumbnailUrl} copyable />}
               {launchMeta?.pageId && <DetailItem label="Page" value={launchMeta.pageName || launchMeta.pageId} />}
               {launchMeta?.headline && <DetailItem label="Headline" value={launchMeta.headline} />}
@@ -9299,6 +9349,8 @@ function LaunchResultModal({ result, onClose }: { result: LaunchResult; onClose:
   const [tab, setTab] = useState<"launched" | "performance">("launched")
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [adStatuses, setAdStatuses] = useState<Record<string, string>>({})
+  const [adDetails, setAdDetails] = useState<Record<string, LaunchAdDetail>>({})
+  const [detailCurrency, setDetailCurrency] = useState("USD")
   const [loadingStatus, setLoadingStatus] = useState(false)
   const [insights, setInsights] = useState<any[]>([])
   const [loadingInsights, setLoadingInsights] = useState(false)
@@ -9319,14 +9371,20 @@ function LaunchResultModal({ result, onClose }: { result: LaunchResult; onClose:
     if (!hasAdIds || !result.launchMeta?.adAccountId) return
     setLoadingStatus(true)
     try {
-      const res = await fetch("/api/facebook/ads-insights", {
+      const res = await fetch("/api/facebook/launch-result-details", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ adAccountId: result.launchMeta.adAccountId, adIds, statusOnly: true }),
+        body: JSON.stringify({ adAccountId: result.launchMeta.adAccountId, adIds }),
       })
       const data = await res.json()
       const map: Record<string, string> = {}
-      for (const r of data.insights || []) map[r.adId] = r.effectiveStatus
+      const details: Record<string, LaunchAdDetail> = {}
+      for (const ad of data.ads || []) {
+        map[ad.id] = ad.effective_status
+        details[ad.id] = ad
+      }
       setAdStatuses(map)
+      setAdDetails(details)
+      if (data.currency) setDetailCurrency(data.currency)
     } finally { setLoadingStatus(false) }
   }
 
@@ -9369,7 +9427,7 @@ function LaunchResultModal({ result, onClose }: { result: LaunchResult; onClose:
 
   return (
     <Dialog open onOpenChange={v => !v && onClose()}>
-      <DialogContent className="max-w-4xl w-[95vw] max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden [&>button:last-of-type]:hidden">
+      <DialogContent className="max-w-[min(96vw,1500px)] w-[96vw] max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden [&>button:last-of-type]:hidden">
         <DialogTitle className="sr-only">Launch Result</DialogTitle>
 
         {/* Header */}
@@ -9424,28 +9482,31 @@ function LaunchResultModal({ result, onClose }: { result: LaunchResult; onClose:
                   </Button>
                 </div>
               </div>
-              <div className="border rounded-lg overflow-hidden">
-                <table data-table="compact" className="w-full">
+              <div className="border rounded-lg overflow-x-auto">
+                <table data-table="compact" className="w-full min-w-[1320px]">
                   <thead className="bg-muted/50 border-b">
                     <tr className="text-xs text-muted-foreground">
                       <th className="text-left px-2 w-8">#</th>
                       <th className="text-left px-2 w-10">Thumb</th>
-                      <th className="text-left px-3">Name</th>
+                      <th className="text-left px-3">Campaign name</th>
+                      <th className="text-left px-3">Bid strategy</th>
+                      <th className="text-left px-3">Campaign budget</th>
+                      <th className="text-left px-3">Adset name</th>
+                      <th className="text-left px-3">Bid strategy</th>
+                      <th className="text-left px-3">Adset budget</th>
+                      <th className="text-left px-3">Ad name</th>
                       <th className="text-left px-3 w-28">Status</th>
-                      <th className="text-left px-3 w-40">Ad ID</th>
-                      <th className="text-left px-3 w-32">Ad Set</th>
                     </tr>
                   </thead>
                   <tbody>
                     {result.createdAds.map((ad, i) => {
                       const rowKey = ad.adId || `row-${i}`
                       return (
-                        <AdResultRow key={rowKey} index={i + 1} ad={ad}
+                        <AdResultRow key={rowKey} index={i + 1} ad={ad} detail={adDetails[ad.adId]} currency={detailCurrency}
                           status={adStatuses[ad.adId]}
                           expanded={expandedId === rowKey}
                           onToggle={() => setExpandedId(p => p === rowKey ? null : rowKey)}
-                          launchMeta={result.launchMeta}
-                          batchId={result.batchId} />
+                          launchMeta={result.launchMeta} />
                       )
                     })}
                   </tbody>
@@ -12334,6 +12395,7 @@ function LaunchPageContent() {
   const [launchResult, setLaunchResult] = useState<LaunchResult | null>(null)
   const [launchPhase, setLaunchPhase] = useState<LaunchPhase>("idle")
   const [launchProgressOpen, setLaunchProgressOpen] = useState(false)
+  const [launchProgressAds, setLaunchProgressAds] = useState<LaunchProgressAd[]>([])
   const [launchError, setLaunchError] = useState<string | null>(null)
   const [leftPanelWidth, setLeftPanelWidth] = useState<number>(550)
   const [isResizing, setIsResizing] = useState(false)
@@ -13399,6 +13461,14 @@ function LaunchPageContent() {
 
   const doLaunch = async (scheduledTime?: string, scheduleEndTime?: string) => {
     if (!validate()) return
+    const progressNames = carouselAds.enabled
+      ? carouselAds.carousels.filter(item => item.cards.length >= 2).map(item => item.name)
+      : flexibleAds.enabled
+        ? flexibleAds.flexibleAds.filter(item => item.groups.some(group => group.creativeIds.length > 0)).map(item => item.name)
+        : multiPlacementAds.enabled
+          ? multiPlacementAds.groups.filter(item => item.creativeIds.length >= 2).map(item => item.name)
+          : selectedCreatives.map(creative => adNameOverrides[creative.id] || creative.file_name?.replace(/\.[^/.]+$/, "") || creative.id)
+    setLaunchProgressAds(selectedAdSets.flatMap(() => progressNames.map(name => ({ name, status: "launching" }))))
     setLaunching(true)
     setLaunchResult(null)
     setLaunchPhase("launching")
@@ -13518,6 +13588,7 @@ function LaunchPageContent() {
 
       if (!res.ok) {
         setLaunchPhase("error")
+        setLaunchProgressAds(items => items.map(item => ({ ...item, status: "error" })))
         setLaunchError(data.error || "Launch failed")
         setError(data.error || "Launch failed")
         return
@@ -13556,6 +13627,7 @@ function LaunchPageContent() {
       }
     } catch {
       setLaunchPhase("error")
+      setLaunchProgressAds(items => items.map(item => ({ ...item, status: "error" })))
       setLaunchError("Network error. Please try again.")
       setError("Network error. Please try again.")
     } finally {
@@ -13743,6 +13815,10 @@ function LaunchPageContent() {
     let auditError: string | null = null
 
     const validRows = tableRows.filter(r => r.creative?.id && r.adSetIds.length > 0)
+    setLaunchProgressAds(validRows.flatMap(row => row.adSetIds.map(() => ({
+      name: row.adName.trim() || row.creative?.file_name?.replace(/\.[^/.]+$/, "") || "Ad",
+      status: "launching",
+    }))))
     const batchRows = validRows.map(row => {
       const rowLink = (row.webLink || webLink).trim()
       const rowUtm = (row.urlTags || utmParams).trim()
@@ -13835,7 +13911,10 @@ function LaunchPageContent() {
     setLaunchResult(result)
     setHistoryReload(n => n + 1)
     setLaunchPhase(totalFailed > 0 && totalCreated === 0 ? "error" : "success")
-    if (totalFailed > 0 && totalCreated === 0) setLaunchError("Launch failed")
+    if (totalFailed > 0 && totalCreated === 0) {
+      setLaunchProgressAds(items => items.map(item => ({ ...item, status: "error" })))
+      setLaunchError("Launch failed")
+    }
     setLaunching(false)
   }, [tableRows, selectedAccountId, selectedAccount, selectedPageId, primaryTexts, headlines, cta, webLink, utmParams, launchAsActive, allAdSets, pages])
 
@@ -14050,6 +14129,7 @@ function LaunchPageContent() {
         open={launchProgressOpen}
         onOpenChange={setLaunchProgressOpen}
         error={launchError}
+        plannedAds={launchProgressAds}
         result={launchResult ? {
           success: launchResult.created,
           errors: launchResult.failed,

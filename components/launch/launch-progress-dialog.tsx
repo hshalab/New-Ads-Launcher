@@ -1,7 +1,5 @@
 "use client"
 
-import { useState } from "react"
-
 import {
   Dialog,
   DialogContent,
@@ -9,7 +7,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog"
-import { IconCheck, IconChevronDown, IconLoader2, IconX } from "@tabler/icons-react"
+import { IconCheck, IconLoader2, IconX } from "@tabler/icons-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -31,6 +29,7 @@ interface LaunchProgressDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   error?: string | null
+  plannedAds?: LaunchProgressAd[]
   result?: { success: number; errors: number; total: number; ads?: LaunchProgressAd[] } | null
 }
 
@@ -39,9 +38,9 @@ export function LaunchProgressDialog({
   open,
   onOpenChange,
   error,
+  plannedAds = [],
   result
 }: LaunchProgressDialogProps) {
-  const [expanded, setExpanded] = useState(false)
   const getStatusContent = () => {
     switch (phase) {
       case "idle":
@@ -109,7 +108,7 @@ export function LaunchProgressDialog({
 
   if (!open && phase !== "idle") {
     const active = phase === "validating" || phase === "preparing" || phase === "launching"
-    const ads = result?.ads || []
+    const ads = result?.ads || plannedAds
 
     return (
       <div
@@ -117,11 +116,7 @@ export function LaunchProgressDialog({
         aria-live="polite"
         className="fixed bottom-4 right-20 z-[60] w-[min(360px,calc(100vw-6rem))] overflow-hidden rounded-xl border bg-background text-left shadow-lg"
       >
-        <button
-          type="button"
-          onClick={() => setExpanded(v => !v)}
-          className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/40"
-        >
+        <div className="flex w-full items-center gap-3 px-4 py-3 text-left">
           {active && <IconLoader2 className="size-5 shrink-0 animate-spin text-blue-500" />}
           {phase === "success" && <IconCheck className="size-5 shrink-0 text-green-600" />}
           {phase === "error" && <IconX className="size-5 shrink-0 text-red-600" />}
@@ -130,19 +125,22 @@ export function LaunchProgressDialog({
               {active ? "Launching ads..." : phase === "success" ? "Launch complete" : "Launch failed"}
             </span>
             <span className="block text-xs text-muted-foreground">
-              {result ? `${result.success}/${result.total} succeeded` : "Expand to view progress"}
+              {result ? `${result.success}/${result.total} succeeded` : `${ads.length} ads in progress`}
             </span>
           </span>
-          <IconChevronDown className={cn("size-4 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-180")} />
-        </button>
+        </div>
 
-        {expanded && (
-          <div className="border-t px-4 py-3">
-            {ads.length > 0 ? (
-              <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
-                {ads.map((ad, index) => (
-                  <div key={`${ad.name}-${index}`} className="flex items-center justify-between gap-3 text-xs">
-                    <span className="min-w-0 truncate" title={ad.name}>{ad.name}</span>
+        <div className="border-t px-4 py-3">
+          {ads.length > 0 ? (
+            <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
+              {ads.map((ad, index) => (
+                <div key={`${ad.name}-${index}`} className="flex items-center justify-between gap-3 text-xs">
+                  <span className="min-w-0 truncate" title={ad.name}>{ad.name}</span>
+                  {ad.status === "launching" ? (
+                    <span className="flex shrink-0 items-center gap-1 text-blue-600 dark:text-blue-400">
+                      <IconLoader2 className="size-3 animate-spin" />Launching
+                    </span>
+                  ) : (
                     <span className={cn(
                       "shrink-0 rounded-full px-2 py-0.5 font-medium capitalize",
                       ad.status === "error"
@@ -151,19 +149,14 @@ export function LaunchProgressDialog({
                     )}>
                       {ad.status}
                     </span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                Per-ad status is not exposed until this launch request completes.
-              </p>
-            )}
-            <Button variant="outline" size="sm" className="mt-3 h-8 text-xs" onClick={() => onOpenChange(true)}>
-              Open details
-            </Button>
-          </div>
-        )}
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">Preparing ad rows...</p>
+          )}
+        </div>
       </div>
     )
   }

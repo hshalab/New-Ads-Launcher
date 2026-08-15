@@ -204,7 +204,7 @@ interface Ad {
 }
 
 /**
- * The default row order for all three hierarchy levels: newest created first, then active.
+ * The default row order for all three hierarchy levels: active delivery first, then newest.
  *
  * Meta returns objects in its own order — effectively oldest first — so the campaign, ad set or
  * ad the user launched a minute ago arrived at the bottom of the list. Sorting by name instead
@@ -221,15 +221,15 @@ const byNewestFirst = (
   a: { created_time?: string; effective_status: string; id: string },
   b: { created_time?: string; effective_status: string; id: string },
 ) => {
+  const aActive = a.effective_status === "ACTIVE"
+  const bActive = b.effective_status === "ACTIVE"
+  if (aActive !== bActive) return aActive ? -1 : 1
   const at = a.created_time ? Date.parse(a.created_time) : NaN
   const bt = b.created_time ? Date.parse(b.created_time) : NaN
   const aOk = !Number.isNaN(at)
   const bOk = !Number.isNaN(bt)
   if (aOk && bOk && at !== bt) return bt - at
   if (aOk !== bOk) return aOk ? -1 : 1
-  const aActive = a.effective_status === "ACTIVE"
-  const bActive = b.effective_status === "ACTIVE"
-  if (aActive !== bActive) return aActive ? -1 : 1
   return b.id.localeCompare(a.id, undefined, { numeric: true })
 }
 
@@ -264,6 +264,103 @@ const ACTION_ALIASES: Record<string, string[]> = {
 }
 
 const PAGE_SIZE = 20
+
+type ActiveFirstCursor = { phase: "active" | "inactive"; after?: string }
+type MetaPaging = { after?: string; hasNext: boolean }
+
+const encodeActiveFirstCursor = (cursor: ActiveFirstCursor) =>
+  `active-first:${btoa(JSON.stringify(cursor))}`
+
+const decodeActiveFirstCursor = (value?: string): ActiveFirstCursor => {
+  if (!value?.startsWith("active-first:")) return { phase: "active" }
+  try { return JSON.parse(atob(value.slice("active-first:".length))) as ActiveFirstCursor }
+  catch { return { phase: "active" } }
+}
+
+async function fetchActiveFirstPage<T extends { effective_status: string }>(
+  baseUrl: string,
+  dataKey: "campaigns" | "adSets" | "ads",
+  encodedCursor?: string,
+  signal?: AbortSignal,
+): Promise<{ rows: T[]; paging: MetaPaging }> {
+  const read = async (activeOnly: boolean, after: string | undefined, limit: number) => {
+    const url = `${baseUrl}&limit=${limit}${activeOnly ? "&active_only=true" : ""}${after ? `&after=${encodeURIComponent(after)}` : ""}`
+    const response = await fetch(url, { signal, cache: "no-store" })
+    const payload = await response.json()
+    if (!response.ok) throw new Error(payload.error || "Failed")
+    const payloadRows = (payload[dataKey] || []) as T[]
+    return {
+      rows: (activeOnly ? payloadRows.filter(row => row.effective_status === "ACTIVE") : payloadRows).slice(0, limit),
+      paging: (payload.paging || { hasNext: false }) as MetaPaging,
+    }
+  }
+
+  const collectInactive = async (after: string | undefined, limit: number) => {
+    const rows: T[] = []
+    let cursor = after
+    let hasNext = true
+    while (rows.length < limit && hasNext) {
+      const page = await read(false, cursor, Math.max(1, limit - rows.length))
+      rows.push(...page.rows.filter(row => row.effective_status !== "ACTIVE"))
+      cursor = page.paging.after
+      hasNext = Boolean(page.paging.hasNext && cursor)
+    }
+    return { rows, after: cursor, hasNext }
+  }
+
+  const hasInactiveAfter = async (after?: string) => {
+    let cursor = after
+    while (true) {
+      const page = await read(false, cursor, PAGE_SIZE)
+      if (page.rows.some(row => row.effective_status !== "ACTIVE")) return true
+      if (!page.paging.hasNext || !page.paging.after) return false
+      cursor = page.paging.after
+    }
+  }
+
+  const state = decodeActiveFirstCursor(encodedCursor)
+  const rows: T[] = []
+  if (state.phase === "active") {
+    const active = await read(true, state.after, PAGE_SIZE)
+    rows.push(...active.rows)
+    if (active.paging.hasNext && active.paging.after) {
+      return { rows, paging: { hasNext: true, after: encodeActiveFirstCursor({ phase: "active", after: active.paging.after }) } }
+    }
+    if (rows.length === PAGE_SIZE) {
+      return {
+        rows,
+        paging: await hasInactiveAfter()
+          ? { hasNext: true, after: encodeActiveFirstCursor({ phase: "inactive" }) }
+          : { hasNext: false },
+      }
+    }
+  }
+
+  const inactive = await collectInactive(state.phase === "inactive" ? state.after : undefined, PAGE_SIZE - rows.length)
+  rows.push(...inactive.rows)
+  const hasMoreInactive = inactive.hasNext && await hasInactiveAfter(inactive.after)
+  return {
+    rows,
+    paging: hasMoreInactive
+      ? { hasNext: true, after: encodeActiveFirstCursor({ phase: "inactive", after: inactive.after }) }
+      : { hasNext: false },
+  }
+}
+
+async function fetchHierarchyPage<T extends { effective_status: string }>(
+  baseUrl: string,
+  dataKey: "campaigns" | "adSets" | "ads",
+  statusFilter: "all" | "ACTIVE" | "PAUSED",
+  after?: string,
+  signal?: AbortSignal,
+) {
+  if (statusFilter === "all") return fetchActiveFirstPage<T>(baseUrl, dataKey, after, signal)
+  const url = `${baseUrl}&limit=${PAGE_SIZE}${statusFilter === "ACTIVE" ? "&active_only=true" : ""}${after ? `&after=${encodeURIComponent(after)}` : ""}`
+  const response = await fetch(url, { signal, cache: "no-store" })
+  const payload = await response.json()
+  if (!response.ok) throw new Error(payload.error || "Failed")
+  return { rows: (payload[dataKey] || []) as T[], paging: (payload.paging || { hasNext: false }) as MetaPaging }
+}
 
 /**
  * Ceiling on the drain that sorting and filtering trigger. One Graph round trip per
@@ -1703,9 +1800,8 @@ function AdsManagerContent() {
 
     const dateParam = buildDateParam()
     const after = pageCursorsRef.current[tab][page - 1]
-    const paginationParam = `&limit=${PAGE_SIZE}${statusFilter === "ACTIVE" ? "&active_only=true" : ""}${after ? `&after=${encodeURIComponent(after)}` : ""}`
     const requiresFreshRead = forceRefresh || pendingFreshAccounts.current.has(selectedAccountId)
-    const refreshParam = `${requiresFreshRead ? "&refresh=true" : ""}${paginationParam}`
+    const refreshParam = requiresFreshRead ? "&refresh=true" : ""
     const cacheKey = `${selectedAccountId}:${dateParam}:${tab}:${statusFilter}:hierarchy:${hierarchyCacheKey}:page:${page}:after:${after || "first"}`
     const request = mainDataRequests.current.begin()
 
@@ -1732,13 +1828,14 @@ function AdsManagerContent() {
 
     try {
       if (tab === "campaigns") {
-        const r = await fetch(`/api/facebook/campaigns?ad_account_id=${encodeURIComponent(selectedAccountId)}&${dateParam}${refreshParam}`, { signal: request.signal, cache: "no-store" })
-        const d = await r.json()
+        const d = await fetchHierarchyPage<Campaign>(
+          `/api/facebook/campaigns?ad_account_id=${encodeURIComponent(selectedAccountId)}&${dateParam}${refreshParam}`,
+          "campaigns", statusFilter, after, request.signal,
+        )
         if (!request.isCurrent()) return
-        if (!r.ok) throw new Error(d.error || "Failed")
-        setCampaigns(prev => page === 1 ? (d.campaigns || []) : mergeById(prev, d.campaigns || []))
+        setCampaigns(prev => page === 1 ? d.rows : mergeById(prev, d.rows))
         setPaging(d.paging || { hasNext: false })
-        clientCache.current.set(cacheKey, { campaigns: d.campaigns || [], paging: d.paging })
+        clientCache.current.set(cacheKey, { campaigns: d.rows, paging: d.paging })
         if (d.paging?.after) {
           setPageCursors(previous => previous.campaigns[page] === d.paging.after
             ? previous
@@ -1750,13 +1847,14 @@ function AdsManagerContent() {
           : hierarchyParentId
             ? `&campaign_id=${encodeURIComponent(hierarchyParentId)}`
             : ""
-        const r = await fetch(`/api/facebook/adsets?ad_account_id=${encodeURIComponent(selectedAccountId)}${parentParam}&${dateParam}${refreshParam}`, { signal: request.signal, cache: "no-store" })
-        const d = await r.json()
+        const d = await fetchHierarchyPage<AdSet>(
+          `/api/facebook/adsets?ad_account_id=${encodeURIComponent(selectedAccountId)}${parentParam}&${dateParam}${refreshParam}`,
+          "adSets", statusFilter, after, request.signal,
+        )
         if (!request.isCurrent()) return
-        if (!r.ok) throw new Error(d.error || "Failed")
-        setAdSets(prev => page === 1 ? (d.adSets || []) : mergeById(prev, d.adSets || []))
+        setAdSets(prev => page === 1 ? d.rows : mergeById(prev, d.rows))
         setPaging(d.paging || { hasNext: false })
-        clientCache.current.set(cacheKey, { adSets: d.adSets || [], paging: d.paging })
+        clientCache.current.set(cacheKey, { adSets: d.rows, paging: d.paging })
         if (d.paging?.after) {
           setPageCursors(previous => previous.adsets[page] === d.paging.after
             ? previous
@@ -1776,13 +1874,14 @@ function AdsManagerContent() {
                 ? `&campaign_id=${encodeURIComponent(hierarchyParentId)}`
                 : ""
             : ""
-        const r = await fetch(`/api/facebook/ads?ad_account_id=${encodeURIComponent(selectedAccountId)}${parentParam}&${dateParam}${refreshParam}`, { signal: request.signal, cache: "no-store" })
-        const d = await r.json()
+        const d = await fetchHierarchyPage<Ad>(
+          `/api/facebook/ads?ad_account_id=${encodeURIComponent(selectedAccountId)}${parentParam}&${dateParam}${refreshParam}`,
+          "ads", statusFilter, after, request.signal,
+        )
         if (!request.isCurrent()) return
-        if (!r.ok) throw new Error(d.error || "Failed")
-        setAds(prev => page === 1 ? (d.ads || []) : mergeById(prev, d.ads || []))
+        setAds(prev => page === 1 ? d.rows : mergeById(prev, d.rows))
         setPaging(d.paging || { hasNext: false })
-        clientCache.current.set(cacheKey, { ads: d.ads || [], paging: d.paging })
+        clientCache.current.set(cacheKey, { ads: d.rows, paging: d.paging })
         if (d.paging?.after) {
           setPageCursors(previous => previous.ads[page] === d.paging.after
             ? previous
@@ -2412,7 +2511,6 @@ function AdsManagerContent() {
         const after = pageCursorsRef.current[tab][cursorPage]
         if (!after) break
 
-        const paginationParam = `&limit=${PAGE_SIZE}${statusFilter === "ACTIVE" ? "&active_only=true" : ""}&after=${encodeURIComponent(after)}`
         const parentParam = tab === "adsets"
           ? hierarchyParentIds.length > 1
             ? `&campaign_ids=${encodeURIComponent(hierarchyParentIds.join(","))}`
@@ -2435,14 +2533,16 @@ function AdsManagerContent() {
                 : ""
             : ""
         const endpoint = tab === "campaigns" ? "campaigns" : tab === "adsets" ? "adsets" : "ads"
-        const r = await fetch(`/api/facebook/${endpoint}?ad_account_id=${encodeURIComponent(selectedAccountId)}${parentParam}&${dateParam}${paginationParam}`)
-        const d = await r.json()
-        if (!r.ok) throw new Error(d.error || "Failed")
+        const dataKey = tab === "campaigns" ? "campaigns" : tab === "adsets" ? "adSets" : "ads"
+        const d = await fetchHierarchyPage<any>(
+          `/api/facebook/${endpoint}?ad_account_id=${encodeURIComponent(selectedAccountId)}${parentParam}&${dateParam}`,
+          dataKey, statusFilter, after,
+        )
 
-        if (tab === "campaigns") setCampaigns(prev => mergeById(prev, d.campaigns || []))
-        else if (tab === "adsets") setAdSets(prev => mergeById(prev, d.adSets || []))
-        else setAds(prev => mergeById(prev, d.ads || []))
-        loadedCount += ((tab === "campaigns" ? d.campaigns : tab === "adsets" ? d.adSets : d.ads) || []).length
+        if (tab === "campaigns") setCampaigns(prev => mergeById(prev, d.rows))
+        else if (tab === "adsets") setAdSets(prev => mergeById(prev, d.rows))
+        else setAds(prev => mergeById(prev, d.rows))
+        loadedCount += d.rows.length
 
         cursorPage += 1
         hasNext = Boolean(d.paging?.hasNext)
@@ -2607,7 +2707,7 @@ function AdsManagerContent() {
         return sortDir === "asc" ? (av as number) - (bv as number) : (bv as number) - (av as number)
       })
     } else {
-      // Default order = newest created first, at all three levels. Meta returns campaigns,
+      // Default order = active delivery first, then newest created, at all three levels. Meta returns campaigns,
       // ad sets and ads in its own order (roughly oldest first), which put the thing the user
       // just launched at the bottom of the list. `created_time` is already requested by
       // lib/facebook.ts for all three levels, so this needs no API change — but the DB-snapshot
