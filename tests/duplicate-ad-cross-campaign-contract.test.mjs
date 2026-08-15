@@ -23,7 +23,7 @@ describe("Duplicate ad cross-campaign destination contract", () => {
     const page = read("app/(dashboard)/ads-manager/page.tsx")
     const route = read("app/api/facebook/duplicate/route.ts")
 
-    assert.match(page, /target_adset_id: duplicateDestination === "existing" \? duplicateTargetId : undefined/)
+    assert.match(page, /target_adset_id: fixedTargetAdSetId/)
     assert.match(route, /getResourceAccountId\(target_adset_id/)
     assert.match(route, /Target ad set access denied/)
   })
@@ -49,6 +49,8 @@ describe("Duplicate ad cross-campaign destination contract", () => {
     assert.match(page, /Draft\/Publish controls the AdLauncher editing workflow only/)
     assert.match(page, /executeDuplicate\("draft"\)/)
     assert.match(page, /executeDuplicate\("publish"\)/)
+    assert.match(page, /if \(workflow === "draft"\) openWorkspaceEditor\(firstCreated\)/)
+    assert.match(page, /const editorLevel: Level = tab === "campaigns" \? "campaign" : tab === "adsets" \? "adset" : "ad"/)
     assert.match(page, /\n\s+Save as draft\r?\n/)
     assert.match(page, /\n\s+Publish duplicate\r?\n/)
     assert.match(campaignRoute, /\["ACTIVE", "PAUSED", "INHERITED"\]\.includes\(body\.statusOption\)/)
@@ -103,17 +105,16 @@ describe("Duplicate wizard contract (recommendation gate → one destination scr
 
   it("copies N selected ads into ONE new ad set instead of one ad set per ad", () => {
     assert.match(page, /const duplicateAdsIntoNewAdSet = async \(\) => \{/)
-    assert.match(page, /if \(tab === "ads" && duplicateDestination === "new"\) await duplicateAdsIntoNewAdSet\(\)/)
-    // Every selected ad of one source ad set travels in a single config, so Meta copies that ad set once.
-    assert.match(page, /selectedAdIds: groupAds\.map\(ad => ad\.id\)/)
-    assert.match(page, /adSetConfigs: \[\.\.\.byAdSet\]\.map/)
-    // The loop must not re-run the same call per ad.
-    assert.match(page, /for \(const id of \(tab === "ads" && duplicateDestination === "new" \? \[\] : ids\)\)/)
+    assert.match(page, /planDuplicateAdTopology\(/)
+    assert.match(page, /duplicateOneAdPerAdSet,/)
+    assert.match(page, /adSetConfigs: group\.adGroups\.map/)
+    assert.match(page, /selectedAdIds: adGroup\.map\(ad => ad\.id\)/)
+    assert.match(page, /for \(const id of \(duplicateCreatesAdSets \? \[\] : ids\)\)/)
   })
 
   it("routes the chosen campaign into the duplicate write", () => {
-    assert.match(page, /targetCampaignIds: duplicateAdCampaignDestination === "new"/)
-    assert.match(page, /newCampaignName: duplicateAdCampaignDestination === "new"/)
+    assert.match(page, /duplicateCampaignCopies\(sourceCampaignId/)
+    assert.match(page, /targetCampaignIds: \[duplicateAdCampaignDestination === "new"/)
     // An ad set from another campaign is never offered, and "original" is impossible once the campaign moves.
     assert.match(page, /duplicateAdCampaignDestination !== "existing" \|\| adSet\.campaign_id === duplicateAdCampaignTargetId/)
     assert.match(page, /if \(duplicateAdCampaignDestination === "new"\) return option === "new"/)

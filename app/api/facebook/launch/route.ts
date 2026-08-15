@@ -6,6 +6,7 @@ import { getAdDetails, createCampaign, createAdSet, copyAdSet, createAd, getVide
 import { adAccountBelongsToOrg, normalizeAdAccountId } from "../_utils"
 import { notifyLaunchOutcome } from "@/lib/notifications/launch"
 import { invalidateMetaReadCacheAfterWrite } from "../_db-cache"
+import { mapWithConcurrency } from "@/lib/bounded-concurrency"
 
 function applyPattern(pattern: string, ctx: { filename?: string; index?: number; date: string; shortDate: string }) {
   let r = pattern
@@ -146,10 +147,9 @@ async function createAdsInAdset(
   globalDisplayUrl = "",
   tokenOpts?: { isManual?: boolean }
 ) {
-  const results: any[] = []
-  const errors: any[] = []
-  for (let i = 0; i < creatives.length; i++) {
-    const creative = creatives[i]
+  const outcomes = await mapWithConcurrency(creatives, 3, async (creative, i) => {
+    const results: any[] = []
+    const errors: any[] = []
     const baseName = creative.file_name.replace(/\.[^/.]+$/, "")
     const _pc = creativeTextMap?.get(creative.id)
     const pcHeadlines: string[] = _pc?.headlines?.filter((h: string) => h.trim()) || []
@@ -173,12 +173,12 @@ async function createAdsInAdset(
     const display_url = perCreative?.displayUrl?.trim() ? perCreative.displayUrl : (textOverride?.displayUrl?.trim() ? textOverride.displayUrl : (globalDisplayUrl || undefined))
     if (!link_url) {
       errors.push({ creativeId: creative.id, error: "Website URL is required. Add a URL in Ad Text Options → Website URL, or edit the creative to add a link." })
-      continue
+      return { results, errors }
     }
     const isValidUrl = /^https?:\/\/.+/.test(link_url)
     if (!isValidUrl) {
       errors.push({ creativeId: creative.id, error: `Invalid URL "${link_url}" — must start with http:// or https://` })
-      continue
+      return { results, errors }
     }
 
     const allTitles = Array.from(new Set([title, ...pcHeadlines, ...(textOverride?.headlines || [])].map((s: string) => s.trim()).filter(Boolean)))
@@ -236,8 +236,12 @@ async function createAdsInAdset(
     } catch (err: any) {
       errors.push({ creativeId: creative.id, error: err.message })
     }
+    return { results, errors }
+  })
+  return {
+    results: outcomes.flatMap(outcome => outcome.results),
+    errors: outcomes.flatMap(outcome => outcome.errors),
   }
-  return { results, errors }
 }
 
 export async function POST(request: NextRequest) {

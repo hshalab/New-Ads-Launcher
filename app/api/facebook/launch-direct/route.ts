@@ -7,6 +7,7 @@ import { isExistingAdCreativeId, resolveExistingAdSources, type ExistingAdSource
 import { createAdminClient } from "@/lib/supabase/admin"
 import { createAd, getVideoThumbnail, getResourceAccountId, getDynamicCreativeAdSets, getAdSetCampaignsAndNames, copyAdSet, pollVideoReady, isFreshThumbnailUrl } from "@/lib/facebook"
 import { adAccountBelongsToOrg, normalizeAdAccountId } from "@/app/api/facebook/_utils"
+import { mapWithConcurrency } from "@/lib/bounded-concurrency"
 
 // Simple launch: create ads directly in existing ad sets.
 // N creatives × M ad sets = N×M ads. No campaign/adset creation needed.
@@ -506,8 +507,10 @@ export async function POST(request: NextRequest) {
         })
         continue
       }
-      for (let creativeIndex = 0; creativeIndex < creatives.length; creativeIndex++) {
-        const creative = creatives[creativeIndex]
+      // ponytail: optimize the observed standard 10-ad publish; grouped flexible/carousel specs stay serial until they show the same latency.
+      const outcomes = await mapWithConcurrency(creatives, 3, async (creative, creativeIndex) => {
+        const created: any[] = []
+        const errors: any[] = []
         if (!creative.is_existing_ad && !creative.fb_image_hash && !creative.fb_video_id) {
           errors.push({
             adSetId,
@@ -515,7 +518,7 @@ export async function POST(request: NextRequest) {
             fileName: creative.file_name,
             error: "Creative not yet uploaded to Meta. Open the Ads Manager page and upload it first.",
           })
-          continue
+          return { created, errors }
         }
 
         // Resolve the adset this ad actually lands in. oneAdPerAdset + not the first
@@ -525,7 +528,7 @@ export async function POST(request: NextRequest) {
           const adSetInfo = adSetCampaigns.get(adSetId)
           if (!adSetInfo) {
             errors.push({ adSetId, creativeId: creative.id, fileName: creative.file_name, error: "Cannot duplicate ad set: campaign_id lookup failed." })
-            continue
+            return { created, errors }
           }
           try {
             const copy = await copyAdSet(token, adSetId, {
@@ -537,7 +540,7 @@ export async function POST(request: NextRequest) {
             adSetNameMap.set(targetAdSetId, adSetInfo.name)
           } catch (err: any) {
             errors.push({ adSetId, creativeId: creative.id, fileName: creative.file_name, error: `Failed to duplicate ad set: ${err.message || "Unknown error"}` })
-            continue
+            return { created, errors }
           }
         }
 
@@ -569,7 +572,7 @@ export async function POST(request: NextRequest) {
           } catch (err: any) {
             errors.push({ adSetId: targetAdSetId, creativeId: creative.id, fileName: creative.file_name, error: err.message || "Failed to reuse existing ad post" })
           }
-          continue
+          return { created, errors }
         }
 
         // ── Post ID mode ──────────────────────────────────────────────────────
@@ -588,7 +591,7 @@ export async function POST(request: NextRequest) {
           } catch (err: any) {
             errors.push({ adSetId: targetAdSetId, creativeId: creative.id, fileName: creative.file_name, error: err.message || "Failed (post_id mode)" })
           }
-          continue
+          return { created, errors }
         }
 
         // ── Creative ID mode ──────────────────────────────────────────────────
@@ -607,7 +610,7 @@ export async function POST(request: NextRequest) {
           } catch (err: any) {
             errors.push({ adSetId: targetAdSetId, creativeId: creative.id, fileName: creative.file_name, error: err.message || "Failed (creative_id mode)" })
           }
-          continue
+          return { created, errors }
         }
 
         // ── New ad mode (default) ─────────────────────────────────────────────
@@ -681,7 +684,10 @@ export async function POST(request: NextRequest) {
             error: err.message || "Failed to create ad",
           })
         }
-      }
+        return { created, errors }
+      })
+      created.push(...outcomes.flatMap(outcome => outcome.created))
+      errors.push(...outcomes.flatMap(outcome => outcome.errors))
     }
     } // end else (standard branch)
 

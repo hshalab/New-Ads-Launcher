@@ -70,6 +70,12 @@ import { formatNumberShort, formatCurrency } from "@/lib/format"
 import { useLaunchBatchesRealtime } from "@/hooks/use-launch-batches-realtime"
 import { isLaunchable } from "@/lib/creative-readiness"
 import { isExistingAdCreativeId, type ExistingAdSource } from "@/lib/existing-ad-launch"
+import {
+  duplicateAdSetsIntoCampaigns,
+  duplicateCampaignCopies,
+  duplicateSingleAdSet,
+} from "@/lib/facebook-duplicate-client"
+import { formatAdSetBidStrategy, formatCampaignBidStrategy } from "@/lib/meta-bid-strategy"
 
 const Tip = ({ text, children, className }: { text: string; children: ReactNode; className?: string }) => (
   <Tooltip>
@@ -4644,10 +4650,8 @@ function DuplicateAdSetModal({
       const errors: string[] = []
       for (let i = 0; i < count; i++) {
         const suffix = count > 1 ? ` ${i + 1}` : ""
-        const res = await fetch(`/api/facebook/adsets/${selectedSourceId}/duplicate?ad_account_id=${encodeURIComponent(adAccountId)}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
+        try {
+          const data = await duplicateSingleAdSet(selectedSourceId, adAccountId, {
             adAccountId,
             renameSuffix: "",
             customName: newName + suffix,
@@ -4667,16 +4671,11 @@ function DuplicateAdSetModal({
             bidStrategy: bidStrategy || undefined,
             ageMin: ageMinSelect ? parseInt(ageMinSelect) : undefined,
             ageMax: ageMaxSelect && ageMaxSelect !== "65+" ? parseInt(ageMaxSelect) : undefined,
-          }),
-        })
-        const text = await res.text()
-        let data: any = {}
-        try { data = text ? JSON.parse(text) : {} } catch { data = { error: `HTTP ${res.status}: ${text.slice(0, 120)}` } }
-        if (!res.ok) {
-          errors.push(data.error || `HTTP ${res.status}`)
-          continue
+          })
+          newAdSets.push(data.adSet as unknown as AdSet)
+        } catch (err) {
+          errors.push(err instanceof Error ? err.message : "Failed to duplicate ad set")
         }
-        newAdSets.push(data.adSet)
       }
       if (newAdSets.length > 0) onDuplicated(newAdSets)
       if (errors.length > 0) {
@@ -5535,26 +5534,16 @@ function DuplicateCampaignModal({
     setError("")
     try {
       // 1) Create the empty campaign(s) in Meta
-      const cRes = await fetch(`/api/facebook/campaigns/${selectedCampaignId}/duplicate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          adAccountId,
-          customName: campaignName,
-          count: campaignCount,
-          launchAsActive,
-          dailyBudget: budgetType === "daily" && budgetAmount ? budgetAmount : undefined,
-          lifetimeBudget: budgetType === "lifetime" && budgetAmount ? budgetAmount : undefined,
-          bidStrategy: bidStrategy === "inherit" ? undefined : bidStrategy,
-          adSetConfigs: [], // empty — only create campaign shells
-        }),
+      const cData = await duplicateCampaignCopies(selectedCampaignId, {
+        adAccountId,
+        customName: campaignName,
+        count: campaignCount,
+        launchAsActive,
+        dailyBudget: budgetType === "daily" && budgetAmount ? budgetAmount : undefined,
+        lifetimeBudget: budgetType === "lifetime" && budgetAmount ? budgetAmount : undefined,
+        bidStrategy: bidStrategy === "inherit" ? undefined : bidStrategy,
+        adSetConfigs: [], // empty - only create campaign shells
       })
-      const cData = await cRes.json()
-      if (!cRes.ok) {
-        setError(cData.error || `HTTP ${cRes.status}`)
-        setCreating(false)
-        return
-      }
       const created = (cData.campaigns || []) as { id: string; name: string }[]
       setNewCampaigns(created)
       if (Array.isArray(cData.warnings) && cData.warnings.length > 0) {
@@ -5616,21 +5605,11 @@ function DuplicateCampaignModal({
     setError("")
     try {
       const adSetConfigsArr = Array.from(selectedAdSetIds).map(id => adSetConfigs[id]).filter(Boolean)
-      const res = await fetch(`/api/facebook/campaigns/duplicate-adsets`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          adAccountId,
-          targetCampaignIds: newCampaigns.map(c => c.id),
-          adSetConfigs: adSetConfigsArr,
-        }),
+      const data = await duplicateAdSetsIntoCampaigns({
+        adAccountId,
+        targetCampaignIds: newCampaigns.map(c => c.id),
+        adSetConfigs: adSetConfigsArr,
       })
-      const data = await res.json()
-      if (!res.ok) {
-        setError(data.error || `HTTP ${res.status}`)
-        setCreating(false)
-        return
-      }
       const allWarnings = [
         ...(Array.isArray(data.warnings) ? data.warnings : []),
         ...(Array.isArray(data.errors) ? data.errors : []),
@@ -9267,30 +9246,6 @@ function formatLaunchBudget(owner?: LaunchMetaObjectDetail, currency = "USD") {
   }
 }
 
-function formatLaunchBidStrategy(strategy: string | undefined, adset: LaunchMetaObjectDetail | undefined, currency = "USD") {
-  if (!strategy) return "—"
-  const amount = adset?.bid_amount && Number.isFinite(Number(adset.bid_amount))
-    ? formatLaunchMoney(adset.bid_amount, currency)
-    : ""
-  if (strategy === "COST_CAP") return `Cost per result goal${amount ? ` (${amount})` : ""}`
-  if (strategy === "LOWEST_COST_WITH_BID_CAP") return `Bid cap${amount ? ` (${amount})` : ""}`
-  if (strategy === "LOWEST_COST_WITH_MIN_ROAS") {
-    const floor = Number(adset?.bid_constraints?.roas_average_floor)
-    return Number.isFinite(floor) ? `ROAS goal (${floor / 10000})` : "ROAS goal"
-  }
-  if (strategy === "LOWEST_COST_WITHOUT_CAP") return adset?.optimization_goal === "VALUE" ? "Highest value" : "Highest volume"
-  return strategy
-}
-
-function formatLaunchCampaignBidStrategy(strategy: string | undefined, adset: LaunchMetaObjectDetail | undefined) {
-  if (!strategy) return "—"
-  if (strategy === "COST_CAP") return "Cost cap"
-  if (strategy === "LOWEST_COST_WITH_BID_CAP") return "Bid cap"
-  if (strategy === "LOWEST_COST_WITH_MIN_ROAS") return "ROAS goal"
-  if (strategy === "LOWEST_COST_WITHOUT_CAP") return adset?.optimization_goal === "VALUE" ? "Highest value" : "Highest volume"
-  return strategy
-}
-
 function AdResultRow({ index, ad, detail, currency, status, expanded, onToggle, launchMeta }: {
   index: number; ad: CreatedAd; detail?: LaunchAdDetail; currency?: string; status?: string; expanded: boolean; onToggle: () => void; launchMeta?: LaunchMeta
 }) {
@@ -9312,10 +9267,10 @@ function AdResultRow({ index, ad, detail, currency, status, expanded, onToggle, 
             : <div className="size-8 rounded bg-muted flex items-center justify-center">{ad.mediaType === "video" ? <IconVideo className="size-3 text-muted-foreground" /> : <IconPhoto className="size-3 text-muted-foreground" />}</div>}
         </td>
         <td className="px-3 text-xs font-medium min-w-44 max-w-56 truncate" title={detail?.campaign?.name}>{detail?.campaign?.name || "—"}</td>
-        <td className="px-3 text-xs text-muted-foreground min-w-36" title={detail?.campaign?.bid_strategy}>{formatLaunchCampaignBidStrategy(detail?.campaign?.bid_strategy, detail?.adset)}</td>
+        <td className="px-3 text-xs text-muted-foreground min-w-36" title={detail?.campaign?.bid_strategy}>{formatCampaignBidStrategy(detail?.campaign?.bid_strategy, { optimizationGoal: detail?.adset?.optimization_goal })}</td>
         <td className="px-3 text-xs text-muted-foreground min-w-36">{campaignBudget}</td>
         <td className="px-3 text-xs font-medium min-w-44 max-w-56 truncate" title={detail?.adset?.name || ad.adSetName}>{detail?.adset?.name || ad.adSetName || "—"}</td>
-        <td className="px-3 text-xs text-muted-foreground min-w-36" title={effectiveBidStrategy}>{formatLaunchBidStrategy(effectiveBidStrategy, detail?.adset, currency)}</td>
+        <td className="px-3 text-xs text-muted-foreground min-w-36" title={effectiveBidStrategy}>{formatAdSetBidStrategy(effectiveBidStrategy, { bidAmount: detail?.adset?.bid_amount, bidConstraints: detail?.adset?.bid_constraints, optimizationGoal: detail?.adset?.optimization_goal, currency })}</td>
         <td className="px-3 text-xs text-muted-foreground min-w-36">{adSetBudget}</td>
         <td className="px-3 text-xs font-medium min-w-44 max-w-56 truncate" title={displayName}>{displayName}</td>
         <td className="px-3 w-28">

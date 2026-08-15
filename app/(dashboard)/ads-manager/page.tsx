@@ -6,6 +6,8 @@ import { AdAccountPill } from "@/components/shared/ad-account-pill"
 import { useAdAccount } from "@/lib/ad-account-context"
 import { LatestRequestGuard } from "@/lib/latest-request-guard"
 import { BID_STRATEGY_LABEL } from "@/lib/create-campaign-bidding"
+import { getBudgetDisplay } from "@/lib/ads-manager-budget"
+import { formatAdSetBidStrategy, formatCampaignBidStrategy } from "@/lib/meta-bid-strategy"
 import { cn } from "@/lib/utils"
 import {
   IconPlus, IconCopy, IconPencil, IconRefresh,
@@ -35,13 +37,18 @@ import type {
   PerformanceGoal,
   SpecialAdCategory,
 } from "@/components/ads-manager/create-flow/types"
+import {
+  duplicateAdSetsIntoCampaigns,
+  duplicateCampaignCopies,
+  planDuplicateAdTopology,
+} from "@/lib/facebook-duplicate-client"
 
 // Modals only render when opened — load their JS on demand instead of in the main bundle
 const PerformancePopup = dynamic(() => import("@/components/ads-manager/PerformancePopup").then(m => m.PerformancePopup), { ssr: false })
 const CreateCampaignModal = dynamic(() => import("@/components/ads-manager/create-flow/CreateCampaignModal").then(m => m.CreateCampaignModal), { ssr: false })
 const CustomizeColumnsModal = dynamic(() => import("@/components/ads-manager/CustomizeColumnsModal").then(m => m.CustomizeColumnsModal), { ssr: false })
 const EditAdSetDrawer = dynamic(() => import("@/components/ads-manager/EditAdSetDrawer").then(m => m.EditAdSetDrawer), { ssr: false })
-import { COLUMN_DEFS, COLUMN_MAP, DEFAULT_PRESETS, ColumnPreset, CustomMetricConfig, getActivePreset, toColumnDef } from "@/lib/column-config"
+import { COLUMN_DEFS, COLUMN_MAP, DEFAULT_PRESETS, ColumnPreset, CustomMetricConfig, getActivePreset, resolveStoredColumnOrder, toColumnDef } from "@/lib/column-config"
 import { evalCustomMetric } from "@/lib/custom-metric-eval"
 import { BreakdownDropdown } from "@/components/ads-manager/BreakdownDropdown"
 import { BREAKDOWN_API_MAP } from "@/lib/breakdown-config"
@@ -105,6 +112,7 @@ type SortDir = "asc" | "desc"
 type DeleteResult = { id: string; success?: boolean; error?: string }
 /** Duplicate always walks campaign level before ad set level; "gate" is the pre-publish warning. */
 type DuplicateStep = "recommend" | "destination" | "options" | "gate"
+const ACTIVE_COLUMN_PRESET_KEY = "adsmanager_active_col_preset_v1"
 
 const STANDARD_ATTR = [
   { key: "1d_click", label: "1-day click", desc: "Conversions counted after an action within 1 day of an ad click." },
@@ -171,12 +179,15 @@ interface AdSet {
   effective_status: string
   campaign_id: string
   campaign_name?: string | null
+  campaign_bid_strategy?: string
   daily_budget?: string
   lifetime_budget?: string
   budget_remaining?: string
   optimization_goal?: string
   billing_event?: string
   bid_strategy?: string
+  bid_amount?: string
+  bid_constraints?: { roas_average_floor?: string | number }
   attribution_spec?: AttributionSpecEntry[]
   learning_stage_info?: LearningStageInfo
   start_time?: string
@@ -195,8 +206,12 @@ interface Ad {
   adset?: {
     attribution_spec?: AttributionSpecEntry[]
     bid_strategy?: string
+    bid_amount?: string
+    bid_constraints?: { roas_average_floor?: string | number }
+    optimization_goal?: string
     learning_stage_info?: LearningStageInfo
   }
+  campaign?: { bid_strategy?: string }
   creative?: { id: string; title?: string; body?: string; image_url?: string; thumbnail_url?: string }
   creative_variations?: { bodies: string[]; titles: string[]; descriptions: string[] }
   created_time?: string
@@ -939,11 +954,6 @@ function formatAttributionSpec(spec: AttributionSpecEntry[] | string | undefined
   return parts.length ? Array.from(new Set(parts)).join(" or ") : "7-day click or 1-day view"
 }
 
-function formatBidStrategy(raw: string | null | undefined): string {
-  if (!raw) return "—"
-  return raw.replace(/_/g, " ").toLowerCase()
-}
-
 function DeliveryBadge({ effective_status, learning, allAdsOff }: { effective_status: string; budget_remaining?: string; learning?: LearningStageInfo; allAdsOff?: boolean }) {
   const status = effective_status || "UNKNOWN"
   const normalizedStatus = status.toUpperCase()
@@ -1329,6 +1339,7 @@ function AdsManagerContent() {
   const [duplicateNewName, setDuplicateNewName] = useState("")
   // Two states only. Meta rejects INHERITED on several of these copy endpoints, so "Match source" is gone.
   const [duplicateDeliveryStatus, setDuplicateDeliveryStatus] = useState<"paused" | "active">("paused")
+  const [duplicateOneAdPerAdSet, setDuplicateOneAdPerAdSet] = useState(false)
   // Duplicate is a wizard: recommendations → campaign level → ad set level → options → publish gate.
   const [duplicateStep, setDuplicateStep] = useState<DuplicateStep>("options")
   const [duplicateRec1, setDuplicateRec1] = useState(true)
@@ -1337,6 +1348,10 @@ function AdsManagerContent() {
   const [duplicateAdCampaignDestination, setDuplicateAdCampaignDestination] = useState<"original" | "existing" | "new">("original")
   const [duplicateAdCampaignTargetId, setDuplicateAdCampaignTargetId] = useState("")
   const [duplicateAdCampaignNewName, setDuplicateAdCampaignNewName] = useState("")
+  const openDuplicateDialog = () => {
+    setDuplicateOneAdPerAdSet(false)
+    setDuplicateDialogOpen(true)
+  }
   const [savingTemplateId, setSavingTemplateId] = useState<string | null>(null)
   const [actionToast, setActionToast] = useState<{ kind: "success" | "error"; message: string; href?: string } | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
@@ -1378,7 +1393,10 @@ function AdsManagerContent() {
   // Meta answered, but not with everything asked for — the rows below are real
   // yet incomplete, which is worse to show silently than an outright error.
   const [breakdownWarning,  setBreakdownWarning]  = useState("")
-
+  const setCustomColumnOrder = (next: string[] | ((previous: string[]) => string[])) => {
+    try { localStorage.removeItem(ACTIVE_COLUMN_PRESET_KEY) } catch {}
+    setColumnOrder(next)
+  }
   useEffect(() => {
     setDuplicateTargetId("")
     setDuplicateAdSetOptions([])
@@ -1471,6 +1489,7 @@ function AdsManagerContent() {
     setDuplicateName("")
     setDuplicateNewName("")
     setDuplicateDeliveryStatus("paused")
+    setDuplicateOneAdPerAdSet(false)
     setDuplicateAdSetPickerOpen(false)
     setDuplicateAdSetSearch("")
     setDuplicateStep(tab === "campaigns" ? "options" : "recommend")
@@ -1525,6 +1544,46 @@ function AdsManagerContent() {
     ({ id: node.id, name: node.name, adId: tab === "ads" ? node.id : undefined })
   const customColumnMap = useMemo(() => ({ ...COLUMN_MAP, ...Object.fromEntries(customMetrics.map(m => [m.id, toColumnDef(m)])) }), [customMetrics])
   const customMetricById = useMemo(() => new Map(customMetrics.map(m => [m.id, m])), [customMetrics])
+  const rawBidStrategy = (row: Campaign | AdSet | Ad): string | null => {
+    if (tab === "campaigns") return (row as Campaign).bid_strategy || null
+    if (tab === "adsets") {
+      const adSet = row as AdSet
+      return adSet.bid_strategy
+        || adSet.campaign_bid_strategy
+        || campaigns.find(campaign => campaign.id === adSet.campaign_id)?.bid_strategy
+        || null
+    }
+
+    const ad = row as Ad
+    const adSet = adSets.find(candidate => candidate.id === ad.adset_id)
+    return ad.adset?.bid_strategy
+      || adSet?.bid_strategy
+      || ad.campaign?.bid_strategy
+      || campaigns.find(campaign => campaign.id === ad.campaign_id)?.bid_strategy
+      || null
+  }
+  const bidStrategyContext = (row: Campaign | AdSet | Ad) => {
+    if (tab === "campaigns") {
+      return { optimizationGoal: adSets.find(adSet => adSet.campaign_id === row.id)?.optimization_goal }
+    }
+    if (tab === "adsets") {
+      const adSet = row as AdSet
+      return {
+        bidAmount: adSet.bid_amount,
+        bidConstraints: adSet.bid_constraints,
+        optimizationGoal: adSet.optimization_goal,
+        currency: selectedAccount?.currency || "USD",
+      }
+    }
+    const ad = row as Ad
+    const adSet = adSets.find(candidate => candidate.id === ad.adset_id)
+    return {
+      bidAmount: ad.adset?.bid_amount || adSet?.bid_amount,
+      bidConstraints: ad.adset?.bid_constraints || adSet?.bid_constraints,
+      optimizationGoal: ad.adset?.optimization_goal || adSet?.optimization_goal,
+      currency: selectedAccount?.currency || "USD",
+    }
+  }
   const getColWidth = (id: string) => {
     if (columnWidths[id]) return columnWidths[id]
     if (id === "results") return 120
@@ -1724,7 +1783,10 @@ function AdsManagerContent() {
       const raw = localStorage.getItem("adsmanager_col_order_v3")
       if (raw) {
         const parsed = JSON.parse(raw) as string[]
-        const valid = parsed.filter(id => validIds.has(id))
+        const valid = resolveStoredColumnOrder(
+          parsed.filter(id => validIds.has(id)),
+          localStorage.getItem(ACTIVE_COLUMN_PRESET_KEY),
+        )
         if (valid.length > 0) setColumnOrder(valid)
       }
       const rawPresets = localStorage.getItem("adsmanager_col_presets")
@@ -2117,6 +2179,7 @@ function AdsManagerContent() {
     || duplicateAdCampaignDestination === "original"
     || (duplicateAdCampaignDestination === "existing" ? !!duplicateAdCampaignTargetId : !!duplicateAdCampaignNewName.trim())
   const adSetStepValid = tab === "campaigns"
+    || (tab === "ads" && duplicateOneAdPerAdSet)
     || !((duplicateDestination === "existing" && !duplicateTargetId) || (duplicateDestination === "new" && !duplicateNewName.trim()))
   const canDuplicate = selectedIds.size > 0 && campaignStepValid && adSetStepValid
   const sourceAdSetIds = new Set(ads.filter(ad => selectedIds.has(ad.id)).map(ad => ad.adset_id))
@@ -2185,51 +2248,65 @@ function AdsManagerContent() {
     }
     const copiedName = (node: { name: string }) => ids.length === 1 && duplicateName.trim() ? duplicateName.trim() : `${node.name} - Copy`
     const statusOption = duplicateDeliveryStatus === "active" ? "ACTIVE" : "PAUSED"
+    const firstSelectedAd = tab === "ads" ? sourceById.get(ids[0]) as Ad | undefined : undefined
+    const duplicateCreatesAdSets = tab === "ads" && (duplicateDestination === "new" || duplicateOneAdPerAdSet)
+    const fixedTargetAdSetId = duplicateDestination === "existing" ? duplicateTargetId : firstSelectedAd?.adset_id
 
-    /**
-     * N selected ads going into a new ad set must produce ONE ad set holding N ads, not one
-     * ad set per ad. `duplicate-adsets` copies each source ad set once and pulls the listed ads
-     * into that copy, so the whole selection travels in a single call: ads grouped by their
-     * source ad set, and — when the copies keep their own campaign — one call per source campaign,
-     * because the route crosses every target campaign with every ad set config.
-     */
+    // New-parent copies reuse Launch's campaign/ad-set duplicate flow; only the topology differs.
     const duplicateAdsIntoNewAdSet = async () => {
       const selectedAds = ids.flatMap(id => {
         const ad = sourceById.get(id) as Ad | undefined
-        return ad ? [ad] : []
+        return ad ? [{ id: ad.id, adsetId: ad.adset_id, campaignId: ad.campaign_id, source: ad }] : []
       })
-      const byCampaign = new Map<string, Ad[]>()
-      for (const ad of selectedAds) {
-        // One target campaign for everything unless the copies stay where their source ad lives.
-        const key = duplicateAdCampaignDestination === "original" ? ad.campaign_id : "__single__"
-        byCampaign.set(key, [...(byCampaign.get(key) || []), ad])
+      const topology = planDuplicateAdTopology(
+        selectedAds,
+        duplicateOneAdPerAdSet,
+        duplicateAdCampaignDestination === "original",
+      )
+      let newCampaignId = ""
+
+      if (duplicateAdCampaignDestination === "new") {
+        try {
+          const sourceCampaignId = topology[0]?.sourceCampaignId
+          if (!sourceCampaignId) throw new Error("Selected campaign is no longer loaded")
+          const campaignData = await duplicateCampaignCopies(sourceCampaignId, {
+            adAccountId: selectedAccountId,
+            customName: duplicateAdCampaignNewName.trim() || `${selectedAds[0].source.name} Campaign`,
+            count: 1,
+            statusOption: "PAUSED",
+            adSetConfigs: [],
+          })
+          newCampaignId = campaignData.campaigns?.[0]?.id || ""
+          if (!newCampaignId) throw new Error("Meta returned no copied campaign ID")
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Duplicate campaign failed"
+          for (const id of ids) updatePopupItem(id, { status: "failed", error: message })
+          return
+        }
       }
 
-      for (const [campaignKey, campaignAds] of byCampaign) {
-        const groupIds = campaignAds.map(ad => ad.id)
+      for (const group of topology) {
+        const groupAds = group.adGroups.flat()
+        const groupIds = groupAds.map(ad => ad.id)
         try {
-          const byAdSet = new Map<string, Ad[]>()
-          for (const ad of campaignAds) byAdSet.set(ad.adset_id, [...(byAdSet.get(ad.adset_id) || []), ad])
-
-          const d = await postJson("/api/facebook/campaigns/duplicate-adsets", {
-            targetCampaignIds: duplicateAdCampaignDestination === "new"
-              ? []
-              : [duplicateAdCampaignDestination === "existing" ? duplicateAdCampaignTargetId : campaignKey],
-            newCampaignName: duplicateAdCampaignDestination === "new"
-              ? duplicateAdCampaignNewName.trim() || `${campaignAds[0].name} Campaign`
-              : undefined,
+          const d = await duplicateAdSetsIntoCampaigns({
+            targetCampaignIds: [duplicateAdCampaignDestination === "new"
+              ? newCampaignId
+              : duplicateAdCampaignDestination === "existing"
+                ? duplicateAdCampaignTargetId
+                : group.sourceCampaignId],
             adAccountId: selectedAccountId,
-            adSetConfigs: [...byAdSet].map(([adSetId, groupAds], index) => {
-              const sourceAdSet = adSets.find(item => item.id === adSetId)
-              const baseName = duplicateNewName.trim() || `${sourceAdSet?.name || groupAds[0].name} - Copy`
+            adSetConfigs: group.adGroups.map((adGroup, index) => {
+              const sourceAd = adGroup[0].source
+              const sourceAdSet = adSets.find(item => item.id === sourceAd.adset_id)
+              const baseName = duplicateNewName.trim() || `${sourceAdSet?.name || sourceAd.name} - Copy`
               return {
-                id: adSetId,
-                // Several source ad sets cannot share one name, so only a single group keeps the typed name as-is.
-                customName: byAdSet.size > 1 ? `${baseName} ${index + 1}` : baseName,
+                id: sourceAd.adset_id,
+                customName: group.adGroups.length > 1 ? `${baseName} ${index + 1}` : baseName,
                 copies: copyCount,
                 statusOption,
                 deepCopy: true,
-                selectedAdIds: groupAds.map(ad => ad.id),
+                selectedAdIds: adGroup.map(ad => ad.id),
                 duplicatedAdsStatus: statusOption,
               }
             }),
@@ -2239,7 +2316,7 @@ function AdsManagerContent() {
             .flatMap((adSet: { copiedAdIds?: string[] }) => adSet.copiedAdIds || [])
           if (createdIds.length === 0) throw new Error("Meta returned no copied object ID")
           copiedIds.push(...createdIds)
-          if (!firstCreated) firstCreated = { id: createdIds[0], name: copiedName(campaignAds[0]) }
+          if (!firstCreated) firstCreated = { id: createdIds[0], name: copiedName(groupAds[0].source) }
           for (const id of groupIds) updatePopupItem(id, { status: "success" })
         } catch (err) {
           const message = err instanceof Error ? err.message : "Duplicate failed"
@@ -2252,8 +2329,8 @@ function AdsManagerContent() {
     setMiniStatusPopup({ title: "Duplicating…", total: ids.length, items: pendingItems })
     setIsDuplicating(true)
     try {
-      if (tab === "ads" && duplicateDestination === "new") await duplicateAdsIntoNewAdSet()
-      for (const id of (tab === "ads" && duplicateDestination === "new" ? [] : ids)) {
+      if (duplicateCreatesAdSets) await duplicateAdsIntoNewAdSet()
+      for (const id of (duplicateCreatesAdSets ? [] : ids)) {
         try {
           const node = sourceById.get(id)
           if (!node) throw new Error("Selected item is no longer loaded")
@@ -2262,7 +2339,7 @@ function AdsManagerContent() {
 
           if (tab === "campaigns") {
             const campaign = node as Campaign
-            const d = await postJson(`/api/facebook/campaigns/${encodeURIComponent(id)}/duplicate`, {
+            const d = await duplicateCampaignCopies(id, {
               customName: copiedName(campaign),
               count: copyCount,
               statusOption,
@@ -2272,7 +2349,7 @@ function AdsManagerContent() {
             createdIds = (d.campaigns || []).map((c: { id: string }) => c.id)
           } else if (tab === "adsets") {
             const adSet = node as AdSet
-            const d = await postJson("/api/facebook/campaigns/duplicate-adsets", {
+            const d = await duplicateAdSetsIntoCampaigns({
               targetCampaignIds: duplicateDestination === "new" ? [] : [duplicateDestination === "existing" ? duplicateTargetId : adSet.campaign_id],
               newCampaignName: duplicateDestination === "new" ? duplicateNewName.trim() || `${adSet.name} Campaign` : undefined,
               adAccountId: selectedAccountId,
@@ -2287,8 +2364,8 @@ function AdsManagerContent() {
               }],
             })
             createdIds = (d.campaigns || [])
-              .flatMap((campaign: { adSets?: AdSet[] }) => campaign.adSets || [])
-              .map((adSet: { id: string }) => adSet.id)
+              .flatMap(campaign => campaign.adSets || [])
+              .map(adSet => adSet.id)
           } else {
             const ad = node as Ad
             const d = await postJson("/api/facebook/duplicate", {
@@ -2298,7 +2375,7 @@ function AdsManagerContent() {
               status_option: statusOption,
               copies: copyCount,
               adAccountId: selectedAccountId,
-              target_adset_id: duplicateDestination === "existing" ? duplicateTargetId : undefined,
+              target_adset_id: fixedTargetAdSetId,
             })
             createdIds = d.ids || []
           }
@@ -3217,8 +3294,17 @@ function AdsManagerContent() {
             break
           }
           case "budget": {
-            const daily = (item as any).daily_budget
-            val = daily ? fmtBudget(daily) : "Using ad set budget"
+            const adSet = tab === "ads" ? adSets.find(candidate => candidate.id === (item as Ad).adset_id) : null
+            const campaignId = tab === "campaigns"
+              ? item.id
+              : tab === "adsets"
+                ? (item as AdSet).campaign_id
+                : adSet?.campaign_id
+            const campaign = campaigns.find(candidate => candidate.id === campaignId)
+            const budget = getBudgetDisplay(level, item, campaign, adSet)
+            val = budget.editable && budget.amountMinor
+              ? `${fmtBudget(budget.amountMinor)} ${budget.period}`
+              : budget.label
             break
           }
           case "lifetime_budget":
@@ -3366,7 +3452,7 @@ function AdsManagerContent() {
             val = (item as AdSet).optimization_goal || "—"
             break
           case "bid_strategy":
-            val = (item as any).bid_strategy ?? (item as Ad).adset?.bid_strategy ?? "—"
+            val = rawBidStrategy(item) || "—"
             break
           case "objective":
             val = objective || "—"
@@ -3463,7 +3549,17 @@ function AdsManagerContent() {
       case "delivery":
       case "effective_status": return (r.effective_status || r.status || "").toString()
       case "objective": return (r.objective || "").toString()
-      case "bid_strategy": return (r.bid_strategy || "").toString()
+      case "bid_strategy": return rawBidStrategy(row) || ""
+      case "budget": {
+        const adSet = tab === "ads" ? adSets.find(candidate => candidate.id === (row as Ad).adset_id) : null
+        const campaignId = tab === "campaigns"
+          ? row.id
+          : tab === "adsets"
+            ? (row as AdSet).campaign_id
+            : adSet?.campaign_id
+        const campaign = campaigns.find(candidate => candidate.id === campaignId)
+        return Number(getBudgetDisplay(level, row, campaign, adSet).amountMinor || 0)
+      }
       case "buying_type": return (r.buying_type || "").toString()
       case "optimization_goal": return (r.optimization_goal || "").toString()
       case "attribution_setting": return (r.attribution_setting || "").toString()
@@ -3554,11 +3650,18 @@ function AdsManagerContent() {
         const draft = bulkDrafts[key]
         const displayDaily = draft?.node.daily_budget ?? daily
         const displayLifetime = draft?.node.lifetime_budget ?? lifetime
+        const adSet = tab === "ads" ? adSets.find(candidate => candidate.id === (row as Ad).adset_id) : null
+        const campaignId = tab === "campaigns"
+          ? row.id
+          : tab === "adsets"
+            ? (row as AdSet).campaign_id
+            : adSet?.campaign_id
+        const parentCampaign = campaigns.find(candidate => candidate.id === campaignId)
+        const budget = getBudgetDisplay(level, row, parentCampaign, adSet)
 
         if (tab === "campaigns") {
           const campaign = row as Campaign
-          const budgetEligible = Boolean(daily || lifetime)
-          if (budgetEligible) {
+          if (budget.editable) {
             return (
               <BudgetQuickEditCell
                 targetNode={campaign}
@@ -3575,9 +3678,7 @@ function AdsManagerContent() {
         }
         if (tab === "adsets") {
           const adSet = row as AdSet
-          const campaign = campaigns.find(c => c.id === adSet.campaign_id)
-          const budgetEligible = Boolean(daily || lifetime) && !Boolean(campaign?.daily_budget || campaign?.lifetime_budget)
-          if (budgetEligible) {
+          if (budget.editable) {
             return (
               <BudgetQuickEditCell
                 targetNode={adSet}
@@ -3592,51 +3693,7 @@ function AdsManagerContent() {
             )
           }
         }
-        if (tab === "ads") {
-          const ad = row as Ad
-          const adSet = adSets.find(as => as.id === ad.adset_id)
-          if (adSet) {
-            const campaign = campaigns.find(c => c.id === adSet.campaign_id)
-            const adsetDaily = adSet.daily_budget
-            const adsetLifetime = adSet.lifetime_budget
-            const adsetBudgetEligible = Boolean(adsetDaily || adsetLifetime) && !Boolean(campaign?.daily_budget || campaign?.lifetime_budget)
-            const adsetDraft = bulkDrafts[bulkDraftKey("adset", adSet.id)]
-            const adsetDisplayDaily = adsetDraft?.node.daily_budget ?? adsetDaily
-            const adsetDisplayLifetime = adsetDraft?.node.lifetime_budget ?? adsetLifetime
-
-            if (adsetBudgetEligible) {
-              return (
-                <BudgetQuickEditCell
-                  targetNode={adSet}
-                  targetLevel="adset"
-                  displayMinor={adsetDisplayDaily ?? adsetDisplayLifetime}
-                  displayType={adsetDisplayDaily !== undefined ? "Daily" : "Lifetime"}
-                  canMutate={workspaceAccess.canMutate}
-                  publishing={bulkPublishing}
-                  onSaveDraft={handleSaveBudgetDraft}
-                  onPublish={handlePublishBudget}
-                />
-              )
-            }
-          }
-        }
-        if (daily) {
-          return (
-            <>
-              <span className="text-sm font-medium tabular-nums leading-5">{fmtBudget(daily)}</span>
-              <p className="text-xs text-[#65676b]">Daily</p>
-            </>
-          )
-        }
-        if (lifetime) {
-          return (
-            <>
-              <span className="text-sm font-medium tabular-nums leading-5">{fmtBudget(lifetime)}</span>
-              <p className="text-[#65676b] text-xs">Lifetime</p>
-            </>
-          )
-        }
-        return <span className="text-xs text-[#65676b]">Using ad set budget</span>
+        return <span className="text-xs text-[#65676b]">{budget.label}</span>
       }
 
       case "lifetime_budget":
@@ -3857,11 +3914,9 @@ function AdsManagerContent() {
       case "optimization_goal":
         return <span className="text-xs text-[#65676b]">{(row as AdSet).optimization_goal?.replace(/_/g, " ").toLowerCase() || "—"}</span>
       case "bid_strategy": {
-        // Ads inherit bid_strategy from their parent ad set (fetched via adset{bid_strategy}).
-        const raw = (row as any).bid_strategy
-          ?? (row as Ad).adset?.bid_strategy
-          ?? null
-        return <span className="text-xs text-[#65676b]">{formatBidStrategy(raw)}</span>
+        const strategy = rawBidStrategy(row)
+        const context = bidStrategyContext(row)
+        return <span className="text-xs text-[#65676b]">{tab === "campaigns" ? formatCampaignBidStrategy(strategy, context) : formatAdSetBidStrategy(strategy, context)}</span>
       }
       case "objective":
         return <span className="text-xs text-[#65676b]">{(row as Campaign).objective?.replace(/OUTCOME_/g, "").replace(/_/g, " ").toLowerCase() || "—"}</span>
@@ -4321,7 +4376,7 @@ function AdsManagerContent() {
         </button>
         <button
           disabled={selectedIds.size === 0}
-          onClick={() => setDuplicateDialogOpen(true)}
+          onClick={openDuplicateDialog}
           className="flex items-center gap-1.5 h-7 px-3 text-xs border border-[#ccd0d5] dark:border-gray-700 rounded bg-[#f5f6f7] dark:bg-muted hover:bg-[#ebedf0] dark:hover:bg-muted/80 transition-colors text-[#4b4f56] dark:text-gray-300 font-semibold shadow-sm disabled:opacity-40"
         >
           <IconCopy className="size-3.5" />
@@ -4461,7 +4516,11 @@ function AdsManagerContent() {
                     return (
                       <button
                         key={preset.id}
-                        onClick={() => { setColumnOrder(preset.columns); setColsOpen(false) }}
+                        onClick={() => {
+                          try { localStorage.setItem(ACTIVE_COLUMN_PRESET_KEY, preset.id) } catch {}
+                          setColumnOrder(preset.columns)
+                          setColsOpen(false)
+                        }}
                         className="w-full flex items-center gap-3 px-3 py-1.5 hover:bg-muted/50 transition-colors"
                       >
                         <span className={cn("size-3.5 rounded-full border-2 shrink-0", isActive ? "border-[#1877f2] bg-[#1877f2]" : "border-muted-foreground/40")} />
@@ -4571,9 +4630,9 @@ function AdsManagerContent() {
                                 {columnOrder.map((colId, i) => {
                   const col = customColumnMap[colId]
                   if (!col) return null
-                  const moveLeft = () => setColumnOrder(prev => { const n = [...prev]; [n[i-1], n[i]] = [n[i], n[i-1]]; return n })
-                  const moveRight = () => setColumnOrder(prev => { const n = [...prev]; [n[i], n[i+1]] = [n[i+1], n[i]]; return n })
-                  const remove = () => setColumnOrder(prev => prev.filter(id => id !== colId))
+                  const moveLeft = () => setCustomColumnOrder(prev => { const n = [...prev]; [n[i-1], n[i]] = [n[i], n[i-1]]; return n })
+                  const moveRight = () => setCustomColumnOrder(prev => { const n = [...prev]; [n[i], n[i+1]] = [n[i+1], n[i]]; return n })
+                  const remove = () => setCustomColumnOrder(prev => prev.filter(id => id !== colId))
                   const sortFieldObj = col.sortKey || colId
                   const active = sortField === sortFieldObj
                   const colWidth = getColWidth(colId)
@@ -4694,7 +4753,7 @@ function AdsManagerContent() {
                               <div className="flex items-center gap-1.5 opacity-0 group-hover/cell:opacity-100 transition-opacity">
                                 <button className="text-xs text-[#65676b] font-semibold hover:underline" onClick={() => openWorkspaceEditor(c)}>Edit</button>
                                 <span className="text-[#ccd0d5]">·</span>
-                                <button className="text-xs text-[#65676b] font-semibold hover:underline" onClick={() => { setSelectedIds(new Set([c.id])); setDuplicateDialogOpen(true) }}>Duplicate</button>
+                                <button className="text-xs text-[#65676b] font-semibold hover:underline" onClick={() => { setSelectedIds(new Set([c.id])); openDuplicateDialog() }}>Duplicate</button>
                                 <span className="text-[#ccd0d5]">·</span>
                                 <button className="text-xs text-[#65676b] font-semibold hover:underline" onClick={() => openCharts(c)}>Charts</button>
                                 <span className="text-[#ccd0d5]">·</span>
@@ -4751,7 +4810,7 @@ function AdsManagerContent() {
                               <div className="flex items-center gap-1.5 opacity-0 group-hover/cell:opacity-100 transition-opacity">
                                 <button className="text-xs text-[#65676b] font-semibold hover:underline" onClick={() => openWorkspaceEditor(a)}>Edit</button>
                                 <span className="text-[#ccd0d5]">·</span>
-                                <button className="text-xs text-[#65676b] font-semibold hover:underline" onClick={() => { setSelectedIds(new Set([a.id])); setDuplicateDialogOpen(true) }}>Duplicate</button>
+                                <button className="text-xs text-[#65676b] font-semibold hover:underline" onClick={() => { setSelectedIds(new Set([a.id])); openDuplicateDialog() }}>Duplicate</button>
                                 <span className="text-[#ccd0d5]">·</span>
                                 <button className="text-xs text-[#65676b] font-semibold hover:underline" onClick={() => openCharts(a)}>Charts</button>
                                 <span className="text-[#ccd0d5]">·</span>
@@ -4810,7 +4869,7 @@ function AdsManagerContent() {
                               <div className="flex items-center gap-1.5 opacity-0 group-hover/cell:opacity-100 transition-opacity">
                                 <button className="text-xs text-[#65676b] font-semibold hover:underline" onClick={() => openWorkspaceEditor(a)}>Edit</button>
                                 <span className="text-[#ccd0d5]">·</span>
-                                <button className="text-xs text-[#65676b] font-semibold hover:underline" onClick={() => { setSelectedIds(new Set([a.id])); setDuplicateDialogOpen(true) }}>Duplicate</button>
+                                <button className="text-xs text-[#65676b] font-semibold hover:underline" onClick={() => { setSelectedIds(new Set([a.id])); openDuplicateDialog() }}>Duplicate</button>
                                 <span className="text-[#ccd0d5]">·</span>
                                 <button className="text-xs text-[#65676b] font-semibold hover:underline" onClick={() => openCharts(a)}>Charts</button>
                                 <span className="text-[#ccd0d5]">·</span>
@@ -5345,6 +5404,33 @@ function AdsManagerContent() {
             </section>
             )}
 
+            {tab === "ads" && (duplicateStep === "options" || duplicateStep === "gate") && (
+              <section className="flex items-center justify-between gap-4 rounded-xl border p-4">
+                <div>
+                  <Label htmlFor="duplicate-one-ad-per-adset" className="text-sm font-semibold">1 ad per ad set</Label>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Off keeps every selected ad in one fixed campaign and ad set. On creates a new ad set for each ad.
+                  </p>
+                </div>
+                <button
+                  id="duplicate-one-ad-per-adset"
+                  type="button"
+                  role="switch"
+                  aria-checked={duplicateOneAdPerAdSet}
+                  onClick={() => setDuplicateOneAdPerAdSet(value => !value)}
+                  className={cn(
+                    "relative h-6 w-11 shrink-0 rounded-full transition-colors",
+                    duplicateOneAdPerAdSet ? "bg-[#1877f2]" : "bg-muted-foreground/30",
+                  )}
+                >
+                  <span className={cn(
+                    "absolute top-0.5 size-5 rounded-full bg-white shadow-sm transition-transform",
+                    duplicateOneAdPerAdSet ? "translate-x-5" : "translate-x-0.5",
+                  )} />
+                </button>
+              </section>
+            )}
+
             {(duplicateStep === "options" || duplicateStep === "gate") && (
             <section className="space-y-3">
                 <div>
@@ -5725,7 +5811,7 @@ function AdsManagerContent() {
         open={customizeColsOpen}
         columnOrder={columnOrder}
         customMetrics={customMetrics}
-        onApply={setColumnOrder}
+        onApply={setCustomColumnOrder}
         onSavePreset={saveCustomPreset}
         onSaveCustomMetric={m => setCustomMetrics(p => [...p, m])}
         onClose={() => setCustomizeColsOpen(false)}
@@ -6168,7 +6254,7 @@ function AdsManagerContent() {
           campaigns={campaigns}
           adSets={adSets}
           ads={ads}
-          onDuplicate={(id: string) => { setSelectedIds(new Set([id])); setDuplicateDialogOpen(true) }}
+          onDuplicate={(id: string) => { setSelectedIds(new Set([id])); openDuplicateDialog() }}
           onDelete={(id: string) => { setSelectedIds(new Set([id])); setDeleteConfirmOpen(true) }}
           onEdit={(id: string) => {
             const node = campaigns.find(x => x.id === id) || adSets.find(x => x.id === id) || ads.find(x => x.id === id) || null

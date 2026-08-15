@@ -38,7 +38,7 @@ export const COLUMN_DEFS: ColumnDef[] = [
   { id: "spend",             label: "Amount spent",                         headerLabel: "Amount spent",                         description: "The estimated total amount of money you've spent on your campaign, ad set or ad during its schedule.", tab: "key_metrics", section: "results_spend", sectionLabel: "Results and spend", sortKey: "spend", filterType: "currency"  },
   { id: "results",           label: "Results",                              headerLabel: "Results",                              description: "The number of times your ads achieved an outcome, based on the objective and settings you selected.", tab: "key_metrics", section: "results_spend", sectionLabel: "Results and spend" },
   { id: "cost_per_result",   label: "Cost per result",                      headerLabel: "Cost per result",                      description: "The average cost per result from your ads, calculated as amount spent divided by results.", tab: "key_metrics", section: "results_spend", sectionLabel: "Results and spend" },
-  { id: "budget",            label: "Ad set budget",                        headerLabel: "Ad set budget",                        description: "The budget assigned to this ad set, or the budget inherited from the parent campaign when campaign budget is used.", tab: "key_metrics", section: "results_spend", sectionLabel: "Results and spend", sortKey: "budget" },
+  { id: "budget",            label: "Budget",                               headerLabel: "Budget",                               description: "The budget owned by this campaign or ad set, or the parent budget used by this row.", tab: "key_metrics", section: "results_spend", sectionLabel: "Results and spend", sortKey: "budget" },
   { id: "lifetime_budget",   label: "Lifetime budget",                      headerLabel: "Lifetime budget",                      description: "The maximum amount that you're willing to spend over the lifetime of your campaign or ad set.", tab: "key_metrics", section: "results_spend", sectionLabel: "Results and spend" },
   { id: "purchases",         label: "Purchases",                            headerLabel: "Purchases",                            description: "The number of purchase events attributed to your ads.", tab: "key_metrics", section: "results_spend", sectionLabel: "Results and spend" },
   { id: "purchase_value",    label: "Purchases conversion value",            headerLabel: "Purchases conversion value",            description: "The total value returned from purchase conversion events attributed to your ads.", tab: "key_metrics", section: "results_spend", sectionLabel: "Results and spend" },
@@ -128,7 +128,7 @@ export const DEFAULT_PRESETS: ColumnPreset[] = [
     label: "ECOM",
     isDefault: true,
     columns: [
-      "delivery", "attribution_setting", "budget", "spend", "roas", "purchase_value",
+      "delivery", "attribution_setting", "bid_strategy", "budget", "spend", "roas", "purchase_value",
       "impressions", "frequency", "cpm",
       "cost_per_unique_click", "unique_link_ctr", "ctr", "cost_per_link_click",
       "unique_link_clicks", "lpv_rate", "content_views",
@@ -139,6 +139,24 @@ export const DEFAULT_PRESETS: ColumnPreset[] = [
     ],
   },
 ]
+
+const LEGACY_ECOM_COLUMNS = DEFAULT_PRESETS.find(preset => preset.id === "ecom")!.columns.filter(
+  column => column !== "bid_strategy",
+)
+
+export function migrateStoredColumnOrder(columns: string[]): string[] {
+  const isLegacyEcom = columns.length === LEGACY_ECOM_COLUMNS.length
+    && columns.every((column, index) => column === LEGACY_ECOM_COLUMNS[index])
+  if (!isLegacyEcom) return columns
+
+  const migrated = [...columns]
+  migrated.splice(migrated.indexOf("budget"), 0, "bid_strategy")
+  return migrated
+}
+
+export function resolveStoredColumnOrder(columns: string[], activePresetId: string | null): string[] {
+  return DEFAULT_PRESETS.find(preset => preset.id === activePresetId)?.columns ?? migrateStoredColumnOrder(columns)
+}
 
 export function getActivePreset(
   cols: string[],

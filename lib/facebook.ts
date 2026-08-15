@@ -552,11 +552,13 @@ export interface AdSet {
   effective_status: string
   campaign_id: string
   campaign_name?: string
+  campaign_bid_strategy?: string
   daily_budget?: string
   lifetime_budget?: string
   budget_remaining?: string
   bid_strategy?: string
   bid_amount?: string
+  bid_constraints?: { roas_average_floor?: string | number }
   optimization_goal?: string
   billing_event?: string
   is_dynamic_creative?: boolean
@@ -589,9 +591,9 @@ export async function getAdSets(
     ? `insights.time_range(${timeRange}){${ADS_MANAGER_INSIGHT_FIELDS}}`
     : `insights.date_preset(${datePreset}){${ADS_MANAGER_INSIGHT_FIELDS}}`
   const fields = [
-    "id", "name", "status", "effective_status", "campaign_id", "campaign{name}",
+    "id", "name", "status", "effective_status", "campaign_id", "campaign{name,bid_strategy}",
     "daily_budget", "lifetime_budget", "budget_remaining", "is_dynamic_creative",
-    "optimization_goal", "billing_event", "bid_strategy", "bid_amount",
+    "optimization_goal", "billing_event", "bid_strategy", "bid_amount", "bid_constraints",
     "attribution_spec", "learning_stage_info{status,conversions}",
     "start_time", "end_time", "created_time",
     insightsParam,
@@ -608,6 +610,7 @@ export async function getAdSets(
   return data.map((a: any) => ({
     ...a,
     campaign_name: a.campaign?.name ?? a.campaign_name ?? null,
+    campaign_bid_strategy: a.campaign?.bid_strategy ?? a.campaign_bid_strategy ?? null,
   }))
 }
 
@@ -625,9 +628,9 @@ export async function getAdSetsPage(
     ? `insights.time_range(${timeRange}){${ADS_MANAGER_INSIGHT_FIELDS}}`
     : `insights.date_preset(${datePreset}){${ADS_MANAGER_INSIGHT_FIELDS}}`
   const fields = [
-    "id", "name", "status", "effective_status", "campaign_id", "campaign{name}",
+    "id", "name", "status", "effective_status", "campaign_id", "campaign{name,bid_strategy}",
     "daily_budget", "lifetime_budget", "budget_remaining", "is_dynamic_creative",
-    "optimization_goal", "billing_event", "bid_strategy", "bid_amount",
+    "optimization_goal", "billing_event", "bid_strategy", "bid_amount", "bid_constraints",
     "attribution_spec", "learning_stage_info{status,conversions}",
     "start_time", "end_time", "created_time",
     insightsParam,
@@ -640,7 +643,7 @@ export async function getAdSetsPage(
   if (activeOnly) params.set("effective_status", JSON.stringify(["ACTIVE"]))
   if (after) params.set("after", after)
   const ownerId = campaignId || adAccountId
-  const page = await fetchMetaPage<AdSet & { campaign?: { name?: string } }>(
+  const page = await fetchMetaPage<AdSet & { campaign?: { name?: string; bid_strategy?: string } }>(
     `${GRAPH_API_BASE}/${ownerId}/adsets?${params}`,
     "Failed to get ad sets"
   )
@@ -649,6 +652,7 @@ export async function getAdSetsPage(
     data: page.data.map(adSet => ({
       ...adSet,
       campaign_name: adSet.campaign?.name ?? adSet.campaign_name,
+      campaign_bid_strategy: adSet.campaign?.bid_strategy ?? adSet.campaign_bid_strategy,
     })),
   }
 }
@@ -667,6 +671,13 @@ export interface Ad {
   effective_status: string
   adset_id: string
   campaign_id: string
+  adset?: {
+    bid_strategy?: string
+    bid_amount?: string
+    bid_constraints?: { roas_average_floor?: string | number }
+    optimization_goal?: string
+  }
+  campaign?: { bid_strategy?: string }
   creative?: {
     id: string
     name?: string
@@ -716,7 +727,8 @@ export async function getAds(
     : `insights.date_preset(${datePreset}){${adsInsightFields}}`
   const fields = [
     "id", "name", "status", "effective_status", "adset_id", "campaign_id",
-    "adset{attribution_spec,is_dynamic_creative,bid_strategy,learning_stage_info{status,conversions}}",
+    "adset{attribution_spec,is_dynamic_creative,bid_strategy,bid_amount,bid_constraints,optimization_goal,learning_stage_info{status,conversions}}",
+    "campaign{bid_strategy}",
     "creative{id,name,title,body,image_url,thumbnail_url,asset_feed_spec{bodies{text},titles{text},descriptions{text}}}",
     "created_time",
     insightsParam,
@@ -769,7 +781,8 @@ export async function getAdsPage(
     : `insights.date_preset(${datePreset}){${adsInsightFields}}`
   const fields = [
     "id", "name", "status", "effective_status", "adset_id", "campaign_id",
-    "adset{attribution_spec,is_dynamic_creative,bid_strategy,learning_stage_info{status,conversions}}",
+    "adset{attribution_spec,is_dynamic_creative,bid_strategy,bid_amount,bid_constraints,optimization_goal,learning_stage_info{status,conversions}}",
+    "campaign{bid_strategy}",
     "creative{id,name,title,body,image_url,thumbnail_url,asset_feed_spec{bodies{text},titles{text},descriptions{text}}}",
     "created_time",
     insightsParam,

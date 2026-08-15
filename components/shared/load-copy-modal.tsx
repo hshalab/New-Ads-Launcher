@@ -7,7 +7,6 @@ import {
   IconLoader2,
   IconPlus,
   IconSearch,
-  IconTrash,
 } from "@tabler/icons-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
@@ -172,12 +171,6 @@ export function LoadCopyModal({
     }
   }
 
-  const deleteTemplate = async (id: string) => {
-    if (!confirm("Delete this template?")) return
-    setTemplates(previous => previous.filter(template => template.id !== id))
-    await fetch(`/api/templates/${id}`, { method: "DELETE" })
-  }
-
   return (
     <Dialog open={open} onOpenChange={next => !next && onClose()}>
       <DialogContent className="flex max-h-[88vh] max-w-3xl flex-col gap-0 overflow-hidden p-0">
@@ -250,11 +243,6 @@ export function LoadCopyModal({
                   name={item.name || "Previous ad"}
                   copy={item}
                   onApply={() => apply(item)}
-                  onDelete={
-                    source === "templates"
-                      ? () => deleteTemplate(item.id)
-                      : undefined
-                  }
                 />
               ))}
               {rows.length === 0 && (
@@ -272,12 +260,10 @@ function CopyRow({
   name,
   copy,
   onApply,
-  onDelete,
 }: {
   name: string
   copy: AdCopyValues
   onApply: () => void
-  onDelete?: () => void
 }) {
   return (
     <div className="flex items-start gap-3 rounded-xl border p-4">
@@ -288,11 +274,6 @@ function CopyRow({
         </p>
         <p className="mt-1 truncate text-xs font-medium">{copy.headline || "No headline"}</p>
       </div>
-      {onDelete && (
-        <Button size="icon" variant="ghost" onClick={onDelete} aria-label={`Delete ${name}`}>
-          <IconTrash className="size-4 text-destructive" />
-        </Button>
-      )}
       <Button size="sm" onClick={onApply}>Apply</Button>
     </div>
   )

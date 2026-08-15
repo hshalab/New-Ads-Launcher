@@ -6,10 +6,11 @@ import { isLaunchable } from "@/lib/creative-readiness"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { createAd, getVideoThumbnail, getResourceAccountId, getAdSetCampaignsAndNames, copyAdSet, pollVideoReady, isFreshThumbnailUrl } from "@/lib/facebook"
 import { adAccountBelongsToOrg, normalizeAdAccountId } from "@/app/api/facebook/_utils"
+import { mapWithConcurrency } from "@/lib/bounded-concurrency"
 
 // Table Mode batch launch: accepts all rows in one request.
 // Auth, account validation, creative fetch happen ONCE instead of N times.
-// Meta API calls remain sequential to respect rate limits.
+// Independent ad writes use a small cap; each copy still finishes before its dependent ad write.
 export async function POST(request: NextRequest) {
   const startTime = Date.now()
 
@@ -139,16 +140,17 @@ export async function POST(request: NextRequest) {
         (adSetIds || []).map((id: string, i: number) => [id, (adSetNames || [])[i] || id])
       )
       const adStatus = scheduledStart ? "PAUSED" : (createPaused === false ? "ACTIVE" : "PAUSED")
-      const rowCreatives = (creativeIds || []).map((id: string) => creativeMap.get(id)).filter(Boolean)
+      const rowCreatives: any[] = (creativeIds || []).map((id: string) => creativeMap.get(id)).filter(Boolean)
       const created: any[] = []
       const errors: any[] = []
 
       for (const [adSetIndex, adSetId] of (adSetIds || []).entries()) {
-        for (let creativeIndex = 0; creativeIndex < rowCreatives.length; creativeIndex++) {
-          const creative = rowCreatives[creativeIndex]
+        const outcomes = await mapWithConcurrency(rowCreatives, 3, async (creative, creativeIndex) => {
+          const created: any[] = []
+          const errors: any[] = []
           if (!isLaunchable(creative)) {
             errors.push({ adSetId, creativeId: creative.id, fileName: creative.file_name, error: "Creative not yet uploaded to Meta." })
-            continue
+            return { created, errors }
           }
 
           let targetAdSetId = adSetId
@@ -156,7 +158,7 @@ export async function POST(request: NextRequest) {
             const adSetInfo = adSetCampaigns.get(adSetId)
             if (!adSetInfo) {
               errors.push({ adSetId, creativeId: creative.id, fileName: creative.file_name, error: "Cannot duplicate ad set: campaign_id lookup failed." })
-              continue
+              return { created, errors }
             }
             try {
               const copy = await copyAdSet(token, adSetId, {
@@ -168,7 +170,7 @@ export async function POST(request: NextRequest) {
               adSetNameMap.set(targetAdSetId, adSetInfo.name)
             } catch (err: any) {
               errors.push({ adSetId, creativeId: creative.id, fileName: creative.file_name, error: `Failed to duplicate ad set: ${err.message || "Unknown error"}` })
-              continue
+              return { created, errors }
             }
           }
 
@@ -187,7 +189,7 @@ export async function POST(request: NextRequest) {
             } catch (err: any) {
               errors.push({ adSetId: targetAdSetId, creativeId: creative.id, fileName: creative.file_name, error: err.message })
             }
-            continue
+            return { created, errors }
           }
 
           if (adSourceMode === "creative_id" && sourceId) {
@@ -202,7 +204,7 @@ export async function POST(request: NextRequest) {
             } catch (err: any) {
               errors.push({ adSetId: targetAdSetId, creativeId: creative.id, fileName: creative.file_name, error: err.message })
             }
-            continue
+            return { created, errors }
           }
 
           let thumbnailUrl: string | undefined
@@ -264,7 +266,10 @@ export async function POST(request: NextRequest) {
           } catch (err: any) {
             errors.push({ adSetId: targetAdSetId, creativeId: creative.id, fileName: creative.file_name, error: err.message || "Failed to create ad" })
           }
-        }
+          return { created, errors }
+        })
+        created.push(...outcomes.flatMap(outcome => outcome.created))
+        errors.push(...outcomes.flatMap(outcome => outcome.errors))
       }
 
       rowResults.push({ created, errors, totalAds: created.length, durationMs: Date.now() - rowStart, scheduledStart, scheduledEnd })
